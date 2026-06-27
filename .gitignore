@@ -1,0 +1,33 @@
+# секреты
+.env
+**/.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# локальные данные/артефакты PoC
+poc/.venv/
+poc/*.wav
+poc/*.aiff
+poc/*.m4a
+poc/*.raw
+poc/*.txt
+poc/*.srt
+poc/out_*/
+
+# сборочные артефакты Swift
+app/.build/
+.build/
+
+# собранный образ приложения (сотни МБ — не место в git)
+*.dmg
+*.app/
+
+# тест-данные: личные/чужие голоса; репо может стать публичным — история git вечна
+test data/
+
+# macOS
+.DS_Store

@@ -1,0 +1,10 @@
+# MLaud worker — зависимости (Python 3.12).
+# Основное ядро ставится из git; остальное подтягивается транзитивно.
+gigaam-mlx @ git+https://github.com/aystream/gigaam-mlx.git
+# Транзитивно от gigaam-mlx (фиксируем явно то, что используем напрямую):
+soxr>=1.1.0
+soundfile>=0.14.0
+numpy>=2.0
+requests>=2.30
+# dev:
+pytest>=8.0

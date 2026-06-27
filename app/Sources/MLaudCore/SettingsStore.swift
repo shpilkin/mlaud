@@ -1,0 +1,103 @@
+import Foundation
+
+/// Пользовательские настройки приложения (UserDefaults).
+/// Часть из них пробрасывается в worker через окружение (см. workerEnvironment()).
+public final class SettingsStore {
+    public enum Key {
+        public static let telegramToken = "telegramToken"
+        public static let telegramChatID = "telegramChatID"
+        public static let modelType = "modelType"
+        public static let instantWatch = "instantWatch"
+        public static let notifications = "notificationsEnabled"
+        public static let diarize = "diarizeEnabled"
+        public static let hfToken = "hfToken"
+        public static let numSpeakers = "numSpeakers"
+        public static let diarizeDevice = "diarizeDevice"
+    }
+
+    public static let defaultModel = "rnnt"
+    public static let availableModels = ["rnnt", "ctc"]
+    public static let defaultDevice = "mps"
+    public static let availableDevices = ["mps", "cpu"]
+
+    private let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    public var telegramToken: String {
+        get { defaults.string(forKey: Key.telegramToken) ?? "" }
+        set { defaults.set(newValue, forKey: Key.telegramToken) }
+    }
+
+    public var telegramChatID: String {
+        get { defaults.string(forKey: Key.telegramChatID) ?? "" }
+        set { defaults.set(newValue, forKey: Key.telegramChatID) }
+    }
+
+    public var modelType: String {
+        get {
+            let v = defaults.string(forKey: Key.modelType) ?? Self.defaultModel
+            return Self.availableModels.contains(v) ? v : Self.defaultModel
+        }
+        set { defaults.set(newValue, forKey: Key.modelType) }
+    }
+
+    /// Мгновенная обработка новых файлов (FolderWatcher). По умолчанию включено.
+    public var instantWatch: Bool {
+        get { defaults.object(forKey: Key.instantWatch) == nil ? true : defaults.bool(forKey: Key.instantWatch) }
+        set { defaults.set(newValue, forKey: Key.instantWatch) }
+    }
+
+    /// Системные уведомления о готовности/ошибке. По умолчанию включено.
+    public var notificationsEnabled: Bool {
+        get { defaults.object(forKey: Key.notifications) == nil ? true : defaults.bool(forKey: Key.notifications) }
+        set { defaults.set(newValue, forKey: Key.notifications) }
+    }
+
+    /// Диаризация (pyannote). По умолчанию выключена. Требует hfToken.
+    public var diarizeEnabled: Bool {
+        get { defaults.bool(forKey: Key.diarize) }
+        set { defaults.set(newValue, forKey: Key.diarize) }
+    }
+
+    public var hfToken: String {
+        get { defaults.string(forKey: Key.hfToken) ?? "" }
+        set { defaults.set(newValue, forKey: Key.hfToken) }
+    }
+
+    /// Число спикеров (0 = автоопределение).
+    public var numSpeakers: Int {
+        get { max(0, defaults.integer(forKey: Key.numSpeakers)) }
+        set { defaults.set(max(0, newValue), forKey: Key.numSpeakers) }
+    }
+
+    /// Устройство для диаризации: 'mps' (быстро, Apple Silicon) или 'cpu'.
+    public var diarizeDevice: String {
+        get {
+            let v = defaults.string(forKey: Key.diarizeDevice) ?? Self.defaultDevice
+            return Self.availableDevices.contains(v) ? v : Self.defaultDevice
+        }
+        set { defaults.set(newValue, forKey: Key.diarizeDevice) }
+    }
+
+    /// Переменные окружения для worker'а. Telegram-ключи добавляются только если заданы —
+    /// иначе worker возьмёт значения из своего .env (обратная совместимость).
+    public func workerEnvironment() -> [String: String] {
+        var env = ["MLAUD_MODEL": modelType]
+        let token = telegramToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chat = telegramChatID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !token.isEmpty { env["MLAUD_TG_TOKEN"] = token }
+        if !chat.isEmpty { env["MLAUD_TG_CHAT_ID"] = chat }
+
+        if diarizeEnabled {
+            env["MLAUD_DIARIZE"] = "1"
+            env["MLAUD_DIARIZE_DEVICE"] = diarizeDevice
+        }
+        let hf = hfToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !hf.isEmpty { env["MLAUD_HF_TOKEN"] = hf }
+        if numSpeakers > 0 { env["MLAUD_NUM_SPEAKERS"] = String(numSpeakers) }
+        return env
+    }
+}
