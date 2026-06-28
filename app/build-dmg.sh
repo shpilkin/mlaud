@@ -11,7 +11,7 @@ REPO=".."
 APP_NAME="MLaud"
 EXE_NAME="MLaudApp"
 BUNDLE_ID="com.mlaud.app"
-VERSION="0.4.1"
+VERSION="0.4.3"
 
 VENV="$REPO/poc/.venv"
 SITE="$VENV/lib/python3.12/site-packages"
@@ -44,6 +44,10 @@ mkdir -p "$RES/site-packages"
 rsync -a --exclude '__pycache__' --exclude '*.pyc' --exclude '*.dist-info/RECORD' \
       "$SITE/" "$RES/site-packages/"
 
+echo "==> вкладываю иконку приложения"
+[ -f "AppIcon.icns" ] || { echo "нет AppIcon.icns рядом с build-dmg.sh"; exit 1; }
+cp "AppIcon.icns" "$RES/AppIcon.icns"
+
 echo "==> вкладываю пакет mlaud_worker (без .env)"
 mkdir -p "$RES/worker"
 rsync -a --exclude '__pycache__' --exclude '*.pyc' "$WORKER_PKG" "$RES/worker/"
@@ -57,6 +61,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>$APP_NAME</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundleExecutable</key><string>$EXE_NAME</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>

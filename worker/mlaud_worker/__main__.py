@@ -72,11 +72,21 @@ def main() -> int:
     cfg = build_config()
     notifier = build_notifier()
     result = process_inbox(cfg, notifier=notifier)
+    delivery_failed = False
     for r in result["processed"]:
-        print(f"OK   {r['source']} -> {r['txt']} ({r['segments']} segments)")
+        delivery = r.get("delivery", "?")
+        print(f"OK   {r['source']} -> {r['txt']} ({r['segments']} segments) "
+              f"[доставка: {delivery}]")
+        # Провал доставки раньше был невидим: _deliver ловит ошибку сам, а OK
+        # печатался всегда. Теперь дублируем в stderr, чтобы строка попала в
+        # хвост лога и в текст ошибки в меню приложения.
+        if delivery.startswith("failed"):
+            delivery_failed = True
+            print(f"WARN {r['source']}: доставка в Telegram не удалась — {delivery}",
+                  file=sys.stderr)
     for e in result["errors"]:
         print(f"FAIL {e['source']}: {e['error']}", file=sys.stderr)
-    return 1 if result["errors"] else 0
+    return 1 if (result["errors"] or delivery_failed) else 0
 
 
 if __name__ == "__main__":

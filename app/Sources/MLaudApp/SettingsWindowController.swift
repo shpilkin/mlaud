@@ -21,7 +21,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         self.settings = settings
         self.onSave = onSave
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 470),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
         window.title = "Настройки MLaud"
@@ -49,18 +49,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             l.alignment = .right
             return l
         }
+        // Серая подсказка в третьей колонке — поясняет назначение поля.
+        func hint(_ text: String) -> NSTextField {
+            let l = NSTextField(wrappingLabelWithString: text)
+            l.font = .systemFont(ofSize: 11)
+            l.textColor = .secondaryLabelColor
+            l.isSelectable = false
+            l.maximumNumberOfLines = 2
+            l.preferredMaxLayoutWidth = 230
+            return l
+        }
 
         let grid = NSGridView(views: [
-            [label("Telegram токен:"), tokenField],
-            [label("Telegram chat_id:"), chatField],
-            [label("Модель:"), modelPopup],
-            [NSGridCell.emptyContentView, loginCheck],
-            [NSGridCell.emptyContentView, watchCheck],
+            [label("Telegram токен:"), tokenField, hint("токен бота для доставки .txt в Telegram")],
+            [label("Telegram chat_id:"), chatField, hint("кому слать (твой Telegram chat id)")],
+            [label("Модель:"), modelPopup, hint("rnnt — точнее (рекоменд.); ctc — быстрее, чуть менее точно")],
+            [NSGridCell.emptyContentView, loginCheck, hint("работает только для приложения в /Applications")],
+            [NSGridCell.emptyContentView, watchCheck, hint("реагировать на новый файл сразу; иначе проход раз в 120 с")],
             [NSGridCell.emptyContentView, notifyCheck],
-            [NSGridCell.emptyContentView, diarizeCheck],
-            [label("HF-токен:"), hfField],
-            [label("Число спикеров:"), speakersField],
-            [label("Устройство диаризации:"), devicePopup],
+            [NSGridCell.emptyContentView, diarizeCheck, hint("метки спикеров (pyannote); требует HF-токен ниже")],
+            [label("HF-токен:"), hfField, hint("для скачивания весов pyannote с huggingface.co; нужен один раз")],
+            [label("Число спикеров:"), speakersField, hint("0 = определить авто; N — если точно знаешь сколько говорящих")],
+            [label("Устройство диаризации:"), devicePopup, hint("mps — GPU Apple, ~22× быстрее; cpu — запасной")],
         ])
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowSpacing = 12
