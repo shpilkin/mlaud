@@ -29,7 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let bundled = res.appendingPathComponent("python/bin/python3")
             if fm.isExecutableFile(atPath: bundled.path) { return bundled }
         }
-        return URL(fileURLWithPath: "/Users/<user>/my_projects/mlaud/poc/.venv/bin/python")
+        // dev-фолбэк (`swift run` из каталога app/): путь относительно репозитория.
+        // Своё расположение задаётся через переменную окружения MLAUD_PY.
+        return URL(fileURLWithPath: "../poc/.venv/bin/python")
     }
     private var workerDirectory: URL {
         if let p = ProcessInfo.processInfo.environment["MLAUD_WORKER_DIR"] { return URL(fileURLWithPath: p) }
@@ -37,7 +39,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let bundled = res.appendingPathComponent("worker")
             if fm.fileExists(atPath: bundled.path) { return bundled }
         }
-        return URL(fileURLWithPath: "/Users/<user>/my_projects/mlaud/worker")
+        // dev-фолбэк (`swift run` из каталога app/): путь относительно репозитория.
+        // Своё расположение задаётся через переменную окружения MLAUD_WORKER_DIR.
+        return URL(fileURLWithPath: "../worker")
     }
     /// Доп. PYTHONPATH: вложенный site-packages (в бандле), иначе пусто (dev-venv самодостаточен).
     private var additionalPythonPath: [URL] {
