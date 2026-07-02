@@ -49,3 +49,30 @@ def test_transcription_error_still_nonzero(monkeypatch, capsys):
     out = capsys.readouterr()
     assert code == 1
     assert "FAIL bad.m4a: boom" in out.err
+
+
+def test_redelivered_reported(monkeypatch, capsys):
+    _patch(monkeypatch, {
+        "processed": [],
+        "errors": [],
+        "redelivered": ["старый разговор"],
+        "pending": [],
+    })
+    code = m.main()
+    out = capsys.readouterr()
+    assert code == 0  # всё доставлено, очередь пуста
+    assert "RESEND старый разговор" in out.out
+
+
+def test_pending_queue_is_nonzero(monkeypatch, capsys):
+    _patch(monkeypatch, {
+        "processed": [],
+        "errors": [],
+        "redelivered": [],
+        "pending": ["недоставленный"],
+    })
+    code = m.main()
+    out = capsys.readouterr()
+    assert code == 1  # в очереди остались недоставленные — прогон неуспешен
+    assert "в очереди на доставку: 1" in out.err
+    assert "недоставленный" in out.err

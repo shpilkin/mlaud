@@ -73,6 +73,9 @@ def main() -> int:
     notifier = build_notifier()
     result = process_inbox(cfg, notifier=notifier)
     delivery_failed = False
+    # Досланные из очереди прошлых прогонов (сеть вернулась).
+    for base in result.get("redelivered", []):
+        print(f"RESEND {base}: недоставленный ранее транскрипт отправлен")
     for r in result["processed"]:
         delivery = r.get("delivery", "?")
         print(f"OK   {r['source']} -> {r['txt']} ({r['segments']} segments) "
@@ -86,7 +89,12 @@ def main() -> int:
                   file=sys.stderr)
     for e in result["errors"]:
         print(f"FAIL {e['source']}: {e['error']}", file=sys.stderr)
-    return 1 if (result["errors"] or delivery_failed) else 0
+    # Очередь недоставленного: транскрипты сохранены, уйдут автоматически при появлении сети.
+    pending = result.get("pending", [])
+    if pending:
+        print(f"WARN в очереди на доставку: {len(pending)} — {', '.join(pending)} "
+              f"(доставятся сами при появлении сети)", file=sys.stderr)
+    return 1 if (result["errors"] or delivery_failed or pending) else 0
 
 
 if __name__ == "__main__":

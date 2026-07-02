@@ -11,7 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from . import delivery_queue
 from .config import Config
+from .logutil import redact
 from .output import write_outputs
 from .transcribe import Transcriber
 
@@ -103,11 +105,12 @@ def _deliver(notifier, txt_path: Path, base: str) -> str:
         notifier.send_message(f"{base}: речь не распознана (пустой транскрипт)")
         return "empty"
     except Exception as e:  # noqa: BLE001
+        msg = redact(str(e))  # requests кладёт в текст URL с токеном бота — маскируем
         try:
-            notifier.send_error(f"{base}: доставка не удалась — {e}")
+            notifier.send_error(f"{base}: доставка не удалась — {msg}")
         except Exception:
             pass
-        return f"failed: {e}"
+        return f"failed: {msg}"
 
 
 def process_file(path: Path, cfg: Config, transcriber: Transcriber,
@@ -129,6 +132,9 @@ def process_file(path: Path, cfg: Config, transcriber: Transcriber,
     outputs = write_outputs(segments, out_dir, base)
 
     delivery = _deliver(notifier, outputs["txt"], base)
+    # Сбой доставки (сеть/Telegram недоступны) — в очередь на автоповтор следующим прогоном.
+    if delivery.startswith("failed"):
+        delivery_queue.enqueue(cfg, outputs["txt"], base)
 
     # Архив ВСЕГДА (даже при сбое доставки) — переносим аудио из inbox на локальный диск.
     proc_dir = cfg.processed / period
@@ -161,19 +167,27 @@ def process_inbox(cfg: Config, transcriber: Optional[Transcriber] = None,
                   notifier=None, use_lock: bool = True, diarizer=None) -> dict:
     """Обработать весь inbox пакетом. Возвращает {'processed': [...], 'errors': [...]}."""
     cfg.ensure_dirs()
-    transcriber = transcriber or Transcriber(model_type=cfg.model_type)
-    if diarizer is None:
-        diarizer = _build_diarizer(cfg)
-    results = {"processed": [], "errors": []}
+    results = {"processed": [], "errors": [], "redelivered": [], "pending": []}
 
     def _run():
-        for path in list_audio(cfg):
+        nonlocal transcriber, diarizer
+        # Сначала досылаем всё, что не ушло в прошлые разы (сеть могла вернуться).
+        # Дёшево: модель НЕ грузим, если транскрибировать нечего — прогон может быть
+        # чисто «досыльным» (inbox пуст, но в очереди висит недоставленное).
+        flushed = delivery_queue.flush(cfg, notifier, _deliver)
+        results["redelivered"] = flushed["resent"]
+        files = list_audio(cfg)
+        if files:
+            transcriber = transcriber or Transcriber(model_type=cfg.model_type)
+            if diarizer is None:
+                diarizer = _build_diarizer(cfg)
+        for path in files:
             try:
                 results["processed"].append(
                     process_file(path, cfg, transcriber, notifier, diarizer)
                 )
             except Exception as e:  # noqa: BLE001 — один файл не должен ронять пакет
-                results["errors"].append({"source": path.name, "error": str(e)})
+                results["errors"].append({"source": path.name, "error": redact(str(e))})
                 # Карантин: переносим упавший файл из inbox, иначе он переобрабатывается
                 # каждый проход и бесконечно спамит ошибками (NFR: без вечных ретраев).
                 try:
@@ -183,7 +197,7 @@ def process_inbox(cfg: Config, transcriber: Optional[Transcriber] = None,
                     pass
                 if notifier is not None:
                     try:
-                        notifier.send_error(f"{path.name}: {e}")
+                        notifier.send_error(f"{path.name}: {redact(str(e))}")
                     except Exception:
                         pass
 
@@ -192,4 +206,6 @@ def process_inbox(cfg: Config, transcriber: Optional[Transcriber] = None,
             _run()
     else:
         _run()
+    # Итоговое состояние очереди (после досыла и после новых сбоев за этот прогон).
+    results["pending"] = delivery_queue.pending_bases(cfg)
     return results

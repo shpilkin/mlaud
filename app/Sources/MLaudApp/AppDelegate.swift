@@ -57,6 +57,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .appendingPathComponent("ASR/service/worker.log")
     }
 
+    /// В очереди на доставку есть недоставленные транскрипты (сеть падала при обработке).
+    /// Такие досылаются воркером при следующем прогоне — даже если inbox пуст.
+    private var hasPendingDeliveries: Bool {
+        let url = workerLogURL.deletingLastPathComponent()
+            .appendingPathComponent("pending_delivery.json")
+        guard let data = try? Data(contentsOf: url),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [Any]
+        else { return false }
+        return !arr.isEmpty
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status = folderStore.hasInboxFolder ? .idle : .noFolder
@@ -186,14 +197,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func autoProcess() {
         guard folderStore.hasInboxFolder, !isProcessing else { return }
         guard let folder = folderStore.inboxFolder else { return }
-        guard !scanner.readyAudioFiles(in: folder).isEmpty else { return }
+        // Запускаем воркер, если есть новые файлы ИЛИ висит недоставленное в очереди.
+        guard !scanner.readyAudioFiles(in: folder).isEmpty || hasPendingDeliveries else { return }
         processNow()
     }
 
     @objc private func processNow() {
         guard let folder = folderStore.inboxFolder, !isProcessing else { return }
         let pending = scanner.readyAudioFiles(in: folder)
-        guard !pending.isEmpty else { status = .idle; return }
+        // Прогон «только досыл» (файлов нет, но очередь непуста) — допустим.
+        let flushOnly = pending.isEmpty
+        guard !pending.isEmpty || hasPendingDeliveries else { status = .idle; return }
 
         isProcessing = true
         status = .processing(current: 0, total: pending.count)
@@ -230,10 +244,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async {
                 self.isProcessing = false
-                self.status = result
-                self.notifyResult(result, count: pending.count)
-                // вдруг за время обработки накидали ещё файлов
-                self.scheduleAutoProcess()
+                if flushOnly, case .done = result {
+                    // Тихий досыл очереди: без уведомления «Готово: 0» и без дебаунс-
+                    // ретригера (иначе при падающей сети получим busy-loop). Повтор —
+                    // штатным sweep-таймером раз в 120 с.
+                    self.status = .idle
+                } else {
+                    self.status = result
+                    self.notifyResult(result, count: pending.count)
+                    // вдруг за время обработки накидали ещё файлов
+                    self.scheduleAutoProcess()
+                }
             }
         }
     }

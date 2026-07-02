@@ -155,6 +155,35 @@ def test_delivery_failure_still_archives_and_reports_once(tmp_path):
     assert process_inbox(cfg, transcriber=FakeTranscriber(segs), notifier=notifier)["processed"] == []
 
 
+def test_failed_delivery_enqueued_then_redelivered(tmp_path):
+    """Сбой доставки → транскрипт в очереди → следующий прогон досылает его сам."""
+    cfg = make_cfg(tmp_path)
+    cfg.inbox.mkdir(parents=True)
+    src = cfg.inbox / "2026-06-15_rec.m4a"
+    src.write_bytes(b"x")
+    segs = [{"start": 0.0, "end": 1.0, "text": "привет"}]
+
+    class Failing(FakeNotifier):
+        def send_document(self, file_path, caption=None):
+            raise RuntimeError("Connection to api.telegram.org timed out")
+
+    r1 = process_inbox(cfg, transcriber=FakeTranscriber(segs), notifier=Failing())
+    assert r1["processed"][0]["delivery"].startswith("failed")
+    assert r1["pending"] == ["2026-06-15_rec"]      # встал в очередь
+
+    # «сеть вернулась»: даже без новых файлов очередь досылается
+    working = FakeNotifier()
+    r2 = process_inbox(cfg, transcriber=FakeTranscriber(segs), notifier=working)
+    assert r2["processed"] == []                     # новых файлов нет
+    assert r2["redelivered"] == ["2026-06-15_rec"]   # досланный из очереди
+    assert r2["pending"] == []                        # очередь пуста
+    assert len(working.docs) == 1                     # ушёл файлом .txt
+
+    # третий прогон — очередь уже пуста, повторов нет
+    r3 = process_inbox(cfg, transcriber=FakeTranscriber(segs), notifier=FakeNotifier())
+    assert r3["redelivered"] == [] and r3["pending"] == []
+
+
 def test_failed_file_quarantined_no_infinite_retry(tmp_path):
     """Нечитаемый файл (напр. невыгруженный iCloud) уходит в карантин, не зацикливается."""
     class Broken(FakeTranscriber):
