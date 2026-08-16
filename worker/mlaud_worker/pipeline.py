@@ -142,6 +142,11 @@ def process_file(path: Path, cfg: Config, transcriber: Transcriber,
     dest = proc_dir / path.name
     shutil.move(str(path), str(dest))
 
+    # Сдача артефакта роутеру — после архивации, чтобы в описании стоял путь к аудио на
+    # его постоянном месте. Никогда не роняет обработку: роутер может быть не запущен,
+    # папка обмена — недоступна, а транскрипт уже сделан и доставлен.
+    artifact = _handoff(dest, outputs, segments, cfg)
+
     return {
         "source": path.name,
         "period": period,
@@ -150,7 +155,40 @@ def process_file(path: Path, cfg: Config, transcriber: Transcriber,
         "srt": outputs["srt"],
         "archived": dest,
         "delivery": delivery,
+        "artifact": artifact,
     }
+
+
+def _segments_duration(segments: list[dict]) -> Optional[int]:
+    """Длительность по последнему сегменту — запасной вариант, когда в файле нет mvhd."""
+    ends = [s.get("end") or 0 for s in segments]
+    return int(round(max(ends))) if ends and max(ends) > 0 else None
+
+
+def _handoff(audio_path: Path, outputs: dict, segments: list[dict], cfg: Config) -> str:
+    """Сайдкар рядом с транскриптом + json в папку обмена. Возвращает статус для лога."""
+    from . import artifact
+
+    try:
+        payload = artifact.build_payload(
+            audio_path=audio_path,
+            txt_path=outputs["txt"],
+            srt_path=outputs.get("srt"),
+            asr_root=cfg.asr_root,
+            duration_sec=_segments_duration(segments),
+        )
+        artifact.write_sidecar(outputs["txt"], payload)
+        if cfg.router_inbox is None:
+            return "sidecar"
+        if not cfg.router_inbox.parent.exists():
+            # Роутер не установлен: его каталог данных отсутствует. Создавать папку
+            # обмена внутри несуществующего каталога незачем — jsonы копились бы там,
+            # где их никто не читает.
+            return "no-router"
+        artifact.handoff(cfg.router_inbox, payload)
+        return "sent"
+    except Exception as e:  # noqa: BLE001 — сдача артефакта не должна ломать конвейер
+        return f"failed: {redact(str(e))}"
 
 
 def _build_diarizer(cfg: Config):

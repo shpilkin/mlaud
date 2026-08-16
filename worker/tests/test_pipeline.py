@@ -1,6 +1,7 @@
 """Тесты оркестрации: фильтрация inbox, lock, end-to-end и идемпотентность."""
 
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -243,3 +244,81 @@ def test_process_inbox_end_to_end_and_idempotent(tmp_path, transcriber, short_cl
     result2 = process_inbox(cfg, transcriber=transcriber, notifier=notifier)
     assert result2["processed"] == []
     assert result2["errors"] == []
+
+
+# --- сдача артефакта роутеру ---
+
+
+def test_process_writes_sidecar_and_handoff(tmp_path):
+    """Конвейер оставляет описание рядом с транскриптом и json в папке обмена."""
+    import json
+
+    cfg = make_cfg(tmp_path)
+    cfg.router_inbox = tmp_path / "artifacts_inbox"
+    cfg.inbox.mkdir(parents=True)
+    audio = cfg.inbox / "2026-08-16_14-30-05.m4a"
+    audio.write_bytes(b"audio-bytes" * 100)
+    tr = FakeTranscriber([{"start": 0.0, "end": 1800.0, "text": "поговорили"}])
+
+    result = process_inbox(cfg, transcriber=tr, use_lock=False)
+    assert result["errors"] == []
+    r = result["processed"][0]
+    assert r["artifact"] == "sent"
+
+    sidecar = Path(str(r["txt"]).replace(".txt", ".meta.json"))
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["duration_sec"] == 1800  # из сегментов: в файле нет метаданных m4a
+    # Путь к аудио — на его архивном месте и относительно корня архива.
+    assert payload["audio_path"].startswith("processed/")
+    assert not Path(payload["transcript_path"]).is_absolute()
+
+    handed = list((tmp_path / "artifacts_inbox").glob("*.json"))
+    assert [p.name for p in handed] == [f"{payload['meeting_id']}.json"]
+
+
+def test_handoff_failure_never_breaks_the_pipeline(tmp_path):
+    """Роутер недоступен (папка обмена — это файл): транскрипт всё равно сделан,
+    доставлен и заархивирован."""
+    cfg = make_cfg(tmp_path)
+    cfg.router_inbox = tmp_path / "not-a-dir"
+    cfg.router_inbox.write_text("я файл, а не папка", encoding="utf-8")
+    cfg.inbox.mkdir(parents=True)
+    (cfg.inbox / "rec.m4a").write_bytes(b"x" * 10)
+    notifier = FakeNotifier()
+
+    result = process_inbox(
+        cfg, transcriber=FakeTranscriber([{"start": 0, "end": 1, "text": "привет"}]),
+        notifier=notifier, use_lock=False,
+    )
+    assert result["errors"] == []
+    r = result["processed"][0]
+    assert r["artifact"].startswith("failed")
+    assert r["delivery"] == "sent"
+    assert Path(r["archived"]).exists()
+
+
+def test_sidecar_is_written_even_with_the_router_off(tmp_path):
+    cfg = make_cfg(tmp_path)  # router_inbox не задан
+    cfg.inbox.mkdir(parents=True)
+    (cfg.inbox / "rec.m4a").write_bytes(b"x" * 10)
+    result = process_inbox(
+        cfg, transcriber=FakeTranscriber([{"start": 0, "end": 2, "text": "ага"}]),
+        use_lock=False,
+    )
+    r = result["processed"][0]
+    assert r["artifact"] == "sidecar"
+    assert Path(str(r["txt"]).replace(".txt", ".meta.json")).exists()
+
+
+def test_no_router_installed_means_no_stray_inbox(tmp_path):
+    """Роутер не установлен (нет его каталога данных) — папку обмена не создаём."""
+    cfg = make_cfg(tmp_path)
+    cfg.router_inbox = tmp_path / "EmailReader" / "artifacts_inbox"  # родителя нет
+    cfg.inbox.mkdir(parents=True)
+    (cfg.inbox / "rec.m4a").write_bytes(b"x" * 10)
+    result = process_inbox(
+        cfg, transcriber=FakeTranscriber([{"start": 0, "end": 1, "text": "ага"}]),
+        use_lock=False,
+    )
+    assert result["processed"][0]["artifact"] == "no-router"
+    assert not (tmp_path / "EmailReader").exists()

@@ -50,6 +50,10 @@ def build_config() -> Config:
         cfg.hf_token = os.environ["MLAUD_HF_TOKEN"]
     if os.environ.get("MLAUD_DIARIZE_DEVICE"):
         cfg.diarize_device = os.environ["MLAUD_DIARIZE_DEVICE"]
+    if os.environ.get("MLAUD_ROUTER_INBOX"):
+        # Папка обмена с роутером (Niti). Не задана — сдача артефактов выключена, но
+        # сайдкар рядом с транскриптом пишется всё равно: он полезен сам по себе.
+        cfg.router_inbox = os.environ["MLAUD_ROUTER_INBOX"]
     if os.environ.get("MLAUD_NUM_SPEAKERS"):
         try:
             cfg.num_speakers = int(os.environ["MLAUD_NUM_SPEAKERS"])

@@ -21,6 +21,10 @@ class Config:
     hf_token: str = ""
     diarize_device: str = "mps"   # 'mps' на Apple Silicon ~22x быстрее CPU; 'cpu' как запасной
     num_speakers: int = 0         # 0 = автоопределение
+    # Папка обмена роутера (Niti). None = сдача артефактов выключена, конвейер работает
+    # ровно как раньше. Путь задаётся снаружи: у роутера каталог данных переопределяется
+    # переменной окружения, поэтому хардкодить его нельзя.
+    router_inbox: Path | None = None
 
     def __post_init__(self):
         self.inbox = Path(self.inbox)
@@ -28,6 +32,8 @@ class Config:
         self.processed = Path(self.processed)
         self.failed = Path(self.failed)
         self.service = Path(self.service)
+        if self.router_inbox is not None:
+            self.router_inbox = Path(self.router_inbox)
 
     @classmethod
     def default(cls) -> "Config":
@@ -39,6 +45,11 @@ class Config:
             processed=home / "ASR/Processed/AllRecords",
             failed=home / "ASR/Failed",
             service=home / "ASR/service",
+            # Штатное место каталога данных роутера. Сдача включается сама, когда роутер
+            # установлен, и молча не происходит, когда его нет (см. pipeline._handoff) —
+            # чтобы не плодить папку, которую никто не читает. Переопределяется
+            # MLAUD_ROUTER_INBOX: у роутера каталог данных задаётся переменной окружения.
+            router_inbox=home / "Library/Application Support/EmailReader/artifacts_inbox",
         )
 
     def ensure_dirs(self) -> None:
@@ -48,3 +59,15 @@ class Config:
     @property
     def lock_path(self) -> Path:
         return self.service / "worker.lock"
+
+    @property
+    def asr_root(self) -> Path | None:
+        """Общий корень архива (обычно ~/ASR): от него роутер считает пути к файлам.
+
+        Считается из фактических путей, а не хардкодится, — переопределили каталоги,
+        корень поехал вместе с ними. None, если общего корня нет (разные тома): тогда
+        в артефакт уйдут абсолютные пути."""
+        try:
+            return Path(os.path.commonpath([str(self.output), str(self.processed)]))
+        except ValueError:
+            return None
