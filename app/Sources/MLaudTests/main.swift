@@ -411,6 +411,18 @@ test("HotKey: регистрация и снятие свободной комб
     second.stop()
 }
 
+test("WorkerCommand: ничего не пишется внутрь бандла") {
+    let c = WorkerCommand(pythonExecutable: URL(fileURLWithPath: "/py"),
+                          workerDirectory: URL(fileURLWithPath: "/Applications/MLaud.app/Contents/Resources/worker"),
+                          inboxFolder: URL(fileURLWithPath: "/in"))
+    let env = c.environment(base: [:])
+    for key in ["PYTHONPYCACHEPREFIX", "NUMBA_CACHE_DIR"] {
+        let path = env[key] ?? ""
+        check(!path.isEmpty, "\(key) задан")
+        check(!path.contains(".app/"), "\(key) ведёт НАРУЖУ бандла, получили \(path)")
+    }
+}
+
 // MARK: summary
 
 print("\n==== Swift tests: \(passed) passed, \(failed) failed ====")

@@ -34,6 +34,12 @@ public struct WorkerCommand {
         ["-m", module]
     }
 
+    /// Каталог для кешей, которые Python и numba иначе пишут рядом с исходниками.
+    public static var cacheDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/MLaud")
+    }
+
     /// Окружение для процесса: выбранная папка как MLAUD_INBOX + PYTHONPATH + доп. переменные.
     public func environment(
         base: [String: String] = ProcessInfo.processInfo.environment
@@ -42,6 +48,14 @@ public struct WorkerCommand {
         env["MLAUD_INBOX"] = inboxFolder.path
         env["PYTHONPATH"] = ([workerDirectory] + additionalPythonPath)
             .map { $0.path }.joined(separator: ":")
+        // Ничего не писать внутрь .app. Python кладёт __pycache__ рядом с исходниками, а
+        // numba (через librosa у pyannote) — свой кеш .nbi/.nbc туда же. Оба каталога
+        // оказываются внутри бандла и ломают печать целостности подписи, а от неё зависит,
+        // считает ли система приложение тем самым — то есть выданные разрешения.
+        // Не отключаем кеш, а уводим: с PYTHONDONTWRITEBYTECODE каждый запуск
+        // перекомпилировал бы всё дерево зависимостей заново.
+        env["PYTHONPYCACHEPREFIX"] = Self.cacheDirectory.appendingPathComponent("pycache").path
+        env["NUMBA_CACHE_DIR"] = Self.cacheDirectory.appendingPathComponent("numba").path
         for (key, value) in extraEnvironment {
             env[key] = value
         }
