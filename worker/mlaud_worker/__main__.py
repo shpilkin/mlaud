@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .config import Config
+from .delivery_queue import MAX_ATTEMPTS
 from .pipeline import process_inbox
 from .telegram import TelegramNotifier
 
@@ -93,12 +94,20 @@ def main() -> int:
                   file=sys.stderr)
     for e in result["errors"]:
         print(f"FAIL {e['source']}: {e['error']}", file=sys.stderr)
+    # Исчерпавшие лимит попыток: больше не досылаются, транскрипт остаётся на диске.
+    given_up = result.get("given_up", [])
+    for g in given_up:
+        print(f"GIVEUP {g['base']}: не доставлено за {MAX_ATTEMPTS} попыт(ки) — "
+              f"транскрипт на диске: {g['txt']}", file=sys.stderr)
     # Очередь недоставленного: транскрипты сохранены, уйдут автоматически при появлении сети.
     pending = result.get("pending", [])
     if pending:
         print(f"WARN в очереди на доставку: {len(pending)} — {', '.join(pending)} "
               f"(доставятся сами при появлении сети)", file=sys.stderr)
-    return 1 if (result["errors"] or delivery_failed or pending) else 0
+    # Непустая очередь сама по себе — не ошибка прогона, а штатное ожидание сети.
+    # Раньше она давала exit 1, а приложение считало ненулевой код поводом показать
+    # уведомление и тут же перезапустить worker — получался busy-loop на каждом обрыве.
+    return 1 if (result["errors"] or delivery_failed or given_up) else 0
 
 
 if __name__ == "__main__":

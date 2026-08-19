@@ -13,6 +13,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let watchCheck = NSButton(checkboxWithTitle: "Мгновенная обработка новых файлов", target: nil, action: nil)
     private let notifyCheck = NSButton(checkboxWithTitle: "Системные уведомления о готовности/ошибке", target: nil, action: nil)
     private let diarizeCheck = NSButton(checkboxWithTitle: "Диаризация (определять спикеров, pyannote)", target: nil, action: nil)
+    private let dictationCheck = NSButton(checkboxWithTitle: "Диктовка по горячей клавише", target: nil, action: nil)
+    private lazy var hotKeyRecorder = HotKeyRecorder(combo: settings.dictationHotKey)
     private let hfField = NSTextField()
     private let speakersField = NSTextField()
     private let devicePopup = NSPopUpButton()
@@ -21,14 +23,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         self.settings = settings
         self.onSave = onSave
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 470),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Настройки MLaud"
         super.init(window: window)
         window.delegate = self
         buildUI()
         load()
+        // Высота подбирается под содержимое, а не задаётся числом: подсказки переносятся
+        // на разное число строк, и на глаз выставленные 470 точек накрывали кнопками
+        // последние ряды сетки.
+        if let content = window.contentView {
+            content.layoutSubtreeIfNeeded()
+            let fitting = content.fittingSize
+            window.setContentSize(NSSize(width: max(760, fitting.width),
+                                         height: max(480, fitting.height)))
+        }
     }
 
     @available(*, unavailable)
@@ -55,8 +66,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             l.font = .systemFont(ofSize: 11)
             l.textColor = .secondaryLabelColor
             l.isSelectable = false
-            l.maximumNumberOfLines = 2
-            l.preferredMaxLayoutWidth = 230
+            l.maximumNumberOfLines = 0   // было 2 — длинные подсказки обрезались на полуслове
+            l.preferredMaxLayoutWidth = 250
             return l
         }
 
@@ -67,6 +78,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [NSGridCell.emptyContentView, loginCheck, hint("работает только для приложения в /Applications")],
             [NSGridCell.emptyContentView, watchCheck, hint("реагировать на новый файл сразу; иначе проход раз в 120 с")],
             [NSGridCell.emptyContentView, notifyCheck],
+            [NSGridCell.emptyContentView, dictationCheck, hint("наговорить текст прямо в активное поле ввода; спросит микрофон и «Универсальный доступ»")],
+            [label("Сочетание клавиш:"), hotKeyRecorder, hint("кликни и нажми нужное сочетание; Esc — отмена")],
             [NSGridCell.emptyContentView, diarizeCheck, hint("метки спикеров (pyannote); требует HF-токен ниже")],
             [label("HF-токен:"), hfField, hint("для скачивания весов pyannote с huggingface.co; нужен один раз")],
             [label("Число спикеров:"), speakersField, hint("0 = определить авто; N — если точно знаешь сколько говорящих")],
@@ -98,6 +111,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             tokenField.widthAnchor.constraint(greaterThanOrEqualToConstant: 280),
             buttons.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
             buttons.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+            // Кнопки всегда ниже сетки: без этой связи они рисовались поверх неё.
+            buttons.topAnchor.constraint(greaterThanOrEqualTo: grid.bottomAnchor, constant: 16),
         ])
     }
 
@@ -109,6 +124,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         notifyCheck.state = settings.notificationsEnabled ? .on : .off
         loginCheck.state = LoginItem.isEnabled ? .on : .off
         diarizeCheck.state = settings.diarizeEnabled ? .on : .off
+        dictationCheck.state = settings.dictationEnabled ? .on : .off
         hfField.stringValue = settings.hfToken
         speakersField.stringValue = settings.numSpeakers > 0 ? String(settings.numSpeakers) : ""
         devicePopup.selectItem(withTitle: settings.diarizeDevice)
@@ -121,6 +137,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         settings.instantWatch = watchCheck.state == .on
         settings.notificationsEnabled = notifyCheck.state == .on
         settings.diarizeEnabled = diarizeCheck.state == .on
+        settings.dictationEnabled = dictationCheck.state == .on
+        settings.dictationHotKey = hotKeyRecorder.combo
         settings.hfToken = hfField.stringValue
         settings.numSpeakers = Int(speakersField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         settings.diarizeDevice = devicePopup.titleOfSelectedItem ?? SettingsStore.defaultDevice

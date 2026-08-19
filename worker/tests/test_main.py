@@ -64,7 +64,12 @@ def test_redelivered_reported(monkeypatch, capsys):
     assert "RESEND старый разговор" in out.out
 
 
-def test_pending_queue_is_nonzero(monkeypatch, capsys):
+def test_pending_queue_is_reported_but_zero(monkeypatch, capsys):
+    """Ожидание сети — не ошибка прогона.
+
+    Ненулевой код здесь заставлял приложение показать уведомление и перезапустить
+    worker, а тот снова упирался в лежащую сеть — busy-loop раз в ~12 с.
+    """
     _patch(monkeypatch, {
         "processed": [],
         "errors": [],
@@ -73,6 +78,21 @@ def test_pending_queue_is_nonzero(monkeypatch, capsys):
     })
     code = m.main()
     out = capsys.readouterr()
-    assert code == 1  # в очереди остались недоставленные — прогон неуспешен
+    assert code == 0
     assert "в очереди на доставку: 1" in out.err
     assert "недоставленный" in out.err
+
+
+def test_given_up_is_reported_and_nonzero(monkeypatch, capsys):
+    _patch(monkeypatch, {
+        "processed": [],
+        "errors": [],
+        "redelivered": [],
+        "pending": [],
+        "given_up": [{"base": "сгоревший", "txt": "/out/сгоревший.txt"}],
+    })
+    code = m.main()
+    out = capsys.readouterr()
+    assert code == 1  # исчерпали лимит попыток — это уже отказ, а не ожидание
+    assert "GIVEUP сгоревший" in out.err
+    assert "/out/сгоревший.txt" in out.err

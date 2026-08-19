@@ -8,6 +8,11 @@
 выбрасывается, что снова упало — остаётся ждать. Так пропущенные разговоры прилетают
 сами, как только сеть вернётся, без ручной переотправки.
 
+Попыток на транскрипт — не больше MAX_ATTEMPTS, считая первичную отправку. Дальше
+запись выбрасывается из очереди со строкой GIVEUP в логе: транскрипт лежит на диске,
+а бесконечно долбиться в лежащую сеть незачем. Плата за это честная: если сеть лежит
+дольше, чем длятся оставшиеся попытки, этот транскрипт сам в Telegram не прилетит.
+
 Очередь читается/пишется только под общим файловым локом process_inbox — гонок нет.
 """
 
@@ -16,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 QUEUE_NAME = "pending_delivery.json"
+MAX_ATTEMPTS = 3  # всего отправок на транскрипт, включая первичную (из process_file)
 
 
 def _queue_path(cfg) -> Path:
@@ -51,6 +57,7 @@ def enqueue(cfg, txt_path, base: str) -> None:
         "txt": txt,
         "base": base,
         "failed_at": datetime.now().isoformat(timespec="seconds"),
+        "attempts": 1,  # первичная отправка уже провалилась — она первая из MAX_ATTEMPTS
     })
     _save(cfg, entries)
 
@@ -68,16 +75,19 @@ def flush(cfg, notifier, deliver) -> dict:
     """Попытаться дослать всё из очереди.
 
     deliver — функция (notifier, Path, base) -> str-статус ('sent'/'empty'/'failed…').
-    Успешно доставленные (и исчезнувшие файлы) убираются из очереди; упавшие остаются.
-    Возвращает {'resent': [base…], 'still_pending': [base…]}.
+    Успешно доставленные (и исчезнувшие файлы) убираются из очереди; упавшие остаются
+    до MAX_ATTEMPTS попыток, после чего выбрасываются в 'given_up'.
+    Возвращает {'resent': [base…], 'still_pending': [base…], 'given_up': [{base, txt}…]}.
     """
     entries = _load(cfg)
     if not entries:
-        return {"resent": [], "still_pending": []}
+        return {"resent": [], "still_pending": [], "given_up": []}
     if notifier is None:
-        return {"resent": [], "still_pending": [e.get("base", "?") for e in entries]}
+        # Без notifier'а отправки не было — попытку не засчитываем.
+        return {"resent": [], "given_up": [],
+                "still_pending": [e.get("base", "?") for e in entries]}
 
-    kept, resent = [], []
+    kept, resent, given_up = [], [], []
     for e in entries:
         txt = Path(e.get("txt", ""))
         base = e.get("base") or txt.stem
@@ -86,7 +96,17 @@ def flush(cfg, notifier, deliver) -> dict:
         status = deliver(notifier, txt, base)
         if status in ("sent", "empty"):
             resent.append(base)
-        else:
-            kept.append(e)
+            continue
+        # Записи, созданные до появления счётчика: одна попытка (первичная) уже была.
+        attempts = int(e.get("attempts", 1)) + 1
+        if attempts >= MAX_ATTEMPTS:
+            given_up.append({"base": base, "txt": str(txt)})
+            continue
+        e["attempts"] = attempts
+        kept.append(e)
     _save(cfg, kept)
-    return {"resent": resent, "still_pending": [e.get("base", "?") for e in kept]}
+    return {
+        "resent": resent,
+        "still_pending": [e.get("base", "?") for e in kept],
+        "given_up": given_up,
+    }

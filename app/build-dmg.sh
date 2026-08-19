@@ -11,7 +11,7 @@ REPO=".."
 APP_NAME="MLaud"
 EXE_NAME="MLaudApp"
 BUNDLE_ID="com.mlaud.app"
-VERSION="0.4.4"
+VERSION="0.5.3"
 
 VENV="$REPO/poc/.venv"
 SITE="$VENV/lib/python3.12/site-packages"
@@ -69,14 +69,29 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSMicrophoneUsageDescription</key><string>MLaud не записывает звук; обрабатывает готовые файлы.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Микрофон нужен для диктовки по ⌃⌥D: речь превращается в текст локально, на этом компьютере.</string>
 </dict>
 </plist>
 PLIST
 
-# Ad-hoc подпись всего бандла (включая вложенные python и dylib) — снимает часть преград Gatekeeper.
-echo "==> ad-hoc codesign (--deep)"
-codesign --force --deep --sign - "$APP" 2>/dev/null || echo "(codesign пропущен)"
+# Подпись всего бандла (включая вложенные python и dylib).
+#
+# Важно, ЧЕМ подписано. При ad-hoc система опознаёт программу по хешу файла, поэтому
+# после каждой пересборки выданный «Универсальный доступ» перестаёт к ней относиться —
+# галка в списке остаётся, а AXIsProcessTrusted() отвечает «нет». Со стабильным
+# сертификатом признак становится «тот же идентификатор и тот же сертификат», и
+# разрешение переживает пересборку. Сертификат локальный, самоподписанный, см.
+# docs/feature-dictation.md.
+SIGN_ID="${MLAUD_SIGN_ID:-MLaud Local Signing}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
+    echo "==> codesign «${SIGN_ID}» (--deep)"
+    codesign --force --deep --sign "$SIGN_ID" "$APP"
+else
+    echo "==> ad-hoc codesign (--deep) — стабильной подписи нет:"
+    echo "    разрешения придётся выдавать заново после каждой сборки"
+    codesign --force --deep --sign - "$APP" 2>/dev/null || echo "(codesign пропущен)"
+fi
+echo "==> признак опознания: $(codesign -d -r- "$APP" 2>&1 | grep '^designated' | cut -c1-100)"
 
 echo "==> создание $APP_NAME.dmg"
 rm -f "$APP_NAME.dmg"

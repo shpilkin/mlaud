@@ -13,6 +13,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var watcher: FolderWatcher?
     private var debounceWork: DispatchWorkItem?
     private var settingsWindow: SettingsWindowController?
+    private var dictation: DictationController?
+    private var hotKey: HotKey?
+    /// Не удалось занять сочетание: показываем прямо в меню, иначе диктовка выглядит
+    /// просто сломанной.
+    private var hotKeyFailed = false
 
     private let fm = FileManager.default
 
@@ -91,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             userInfo: nil, repeats: true
         )
         restartWatcher()
+        restartDictation()
         refresh()
         autoProcess()  // подхватить файлы, накопившиеся пока приложение не работало
     }
@@ -99,7 +105,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refresh() {
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "MLaud")
+            // Во время диктовки иконка другая — иначе не видно, что микрофон открыт.
+            let symbol = dictation?.state == .off || dictation == nil ? "waveform" : "mic.fill"
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "MLaud")
             button.image?.isTemplate = true
         }
         statusItem.menu = buildMenu()
@@ -132,6 +140,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem(title: "Открыть лог…",
                                 action: #selector(openWorkerLogFile), keyEquivalent: ""))
+
+        if settings.dictationEnabled {
+            menu.addItem(.separator())
+            let combo = settings.dictationHotKey.display
+            let title: String
+            switch dictation?.state ?? .off {
+            case .off:       title = "Диктовка (\(combo))"
+            case .starting:  title = "Диктовка: загружаю модель…"
+            case .listening: title = "Диктовка: слушаю — \(combo) чтобы закончить"
+            }
+            let item = NSMenuItem(title: title, action: #selector(toggleDictation), keyEquivalent: "")
+            item.isEnabled = dictation?.state != .starting
+            menu.addItem(item)
+            if hotKeyFailed {
+                let warn = NSMenuItem(
+                    title: "  \(settings.dictationHotKey.display) занято — выбери другое в настройках",
+                    action: nil, keyEquivalent: "")
+                warn.isEnabled = false
+                menu.addItem(warn)
+            }
+            menu.addItem(NSMenuItem(title: "Журнал диктовки…",
+                                    action: #selector(openDictationLog), keyEquivalent: ""))
+            if !TextInserter.isTrusted {
+                menu.addItem(NSMenuItem(title: "Выдать «Универсальный доступ»…",
+                                        action: #selector(openAccessibilitySettings),
+                                        keyEquivalent: ""))
+            }
+        }
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Настройки…",
@@ -188,7 +224,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openSettings() {
         if settingsWindow == nil {
             settingsWindow = SettingsWindowController(settings: settings) { [weak self] in
-                self?.restartWatcher()  // применить изменения мгновенной обработки
+                self?.restartWatcher()    // применить изменения мгновенной обработки
+                self?.restartDictation()  // ... и включение/выключение диктовки
                 self?.refresh()
             }
         }
@@ -248,10 +285,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async {
                 self.isProcessing = false
-                if flushOnly, case .done = result {
+                if flushOnly {
                     // Тихий досыл очереди: без уведомления «Готово: 0» и без дебаунс-
-                    // ретригера (иначе при падающей сети получим busy-loop). Повтор —
-                    // штатным sweep-таймером раз в 120 с.
+                    // ретригера — независимо от кода возврата. Ретригер здесь и был
+                    // мотором busy-loop'а: worker при непустой очереди отдавал ненулевой
+                    // код, приложение считало это ошибкой, показывало уведомление и
+                    // перезапускало worker через 1.5 с. Повтор — sweep-таймером раз в 120 с.
                     self.status = .idle
                 } else {
                     self.status = result
@@ -314,7 +353,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(resultsDirectory)
     }
 
+    // MARK: - Диктовка
+
+    /// Пересобрать диктовку под текущие настройки. Хоткей регистрируется всегда, когда
+    /// фича включена; разрешения (микрофон, «Универсальный доступ») спрашиваются лениво,
+    /// при первом нажатии — чтобы приложение не дёргало системные запросы на старте.
+    private func restartDictation() {
+        hotKey?.stop()
+        hotKey = nil
+        dictation?.shutdown()
+        dictation = nil
+        guard settings.dictationEnabled else { return }
+
+        // Замыкание держит значения, а не AppDelegate: пути за время жизни приложения
+        // не меняются, а настройки живут в своём объекте. Так у контроллера нет ссылки
+        // на владельца и не нужен разбор «а вдруг self уже нет».
+        let python = pythonExecutable
+        let workerDir = workerDirectory
+        let extraPath = additionalPythonPath
+        let inbox = folderStore.inboxFolder ?? fm.homeDirectoryForCurrentUser
+        let settings = self.settings
+        let controller = DictationController {
+            var env = settings.workerEnvironment()
+            env["PYTHONUNBUFFERED"] = "1"  // события должны выходить сразу, а не пачкой
+            return WorkerCommand(
+                pythonExecutable: python,
+                workerDirectory: workerDir,
+                inboxFolder: inbox,
+                additionalPythonPath: extraPath,
+                extraEnvironment: env,
+                module: "mlaud_worker.dictate"
+            )
+        }
+        controller.onStateChange = { [weak self] state in
+            DictationLog.write("состояние: \(state)")
+            self?.refresh()
+        }
+        controller.onNeedsAccessibility = { [weak self] in
+            DictationLog.write("ОШИБКА: нет «Универсального доступа»")
+            self?.presentAccessibilityHelp()
+        }
+        controller.onError = { [weak self] message in
+            DictationLog.write("ОШИБКА: \(message)")
+            guard let self, self.settings.notificationsEnabled else { return }
+            UserNotifier.notify(title: "MLaud — диктовка", body: message)
+        }
+        dictation = controller
+
+        let combo = settings.dictationHotKey
+        let key = HotKey(combo: combo) { [weak self] in
+            DictationLog.write("нажато \(combo.display)")
+            self?.toggleDictation()
+        }
+        if key.start() {
+            hotKey = key
+            hotKeyFailed = false
+            DictationLog.write("горячая клавиша \(combo.display) зарегистрирована")
+        } else {
+            hotKeyFailed = true
+            DictationLog.write("НЕ УДАЛОСЬ занять \(combo.display) — комбинация занята")
+            if settings.notificationsEnabled {
+                UserNotifier.notify(
+                    title: "MLaud — диктовка",
+                    body: "\(combo.display) занято другим приложением; выбери другое сочетание в настройках")
+            }
+        }
+    }
+
+    @objc private func toggleDictation() {
+        DictationLog.write("переключение диктовки из состояния \(dictation?.state.debugName ?? "нет контроллера")")
+        dictation?.toggle()
+    }
+
+    /// Объясняем ловушку ad-hoc подписи. Просто «дайте разрешение» здесь бесполезно:
+    /// в списке галка обычно уже стоит — но у старого файла, а не у нового.
+    private func presentAccessibilityHelp() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Диктовке нужен «Универсальный доступ»"
+        alert.informativeText = """
+            Без него набранный текст некуда печатать: система молча выбрасывает \
+            нажатия, которые шлёт приложение.
+
+            Если MLaud в списке уже стоит с галкой — она относится к прошлой сборке. \
+            Подпись у приложения ad-hoc, поэтому разрешение привязано к конкретному \
+            файлу, а после обновления файл другой. Удалите строку MLaud кнопкой «−» \
+            и добавьте /Applications/MLaud.app заново.
+            """
+        alert.addButton(withTitle: "Открыть настройки")
+        alert.addButton(withTitle: "Позже")
+        if alert.runModal() == .alertFirstButtonReturn {
+            openAccessibilitySettings()
+        }
+    }
+
+    @objc private func openAccessibilitySettings() {
+        let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func openDictationLog() {
+        let url = DictationLog.url
+        if !fm.fileExists(atPath: url.path) {
+            DictationLog.write("журнал открыт до первой записи")
+        }
+        // Запись асинхронная — даём ей долететь, иначе откроется пустой файл.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     @objc private func onWake() { autoProcess() }
 
-    @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func quit() {
+        dictation?.shutdown()  // резидентная модель держит ~1.6 ГБ — отпускаем явно
+        NSApp.terminate(nil)
+    }
 }

@@ -13,6 +13,9 @@ public final class SettingsStore {
         public static let hfToken = "hfToken"
         public static let numSpeakers = "numSpeakers"
         public static let diarizeDevice = "diarizeDevice"
+        public static let dictation = "dictationEnabled"
+        public static let dictationKeyCode = "dictationKeyCode"
+        public static let dictationModifiers = "dictationModifiers"
     }
 
     public static let defaultModel = "rnnt"
@@ -71,6 +74,34 @@ public final class SettingsStore {
     public var numSpeakers: Int {
         get { max(0, defaults.integer(forKey: Key.numSpeakers)) }
         set { defaults.set(max(0, newValue), forKey: Key.numSpeakers) }
+    }
+
+    /// Диктовка по горячей клавише (⌃⌥D). По умолчанию включено: сам хоткей ничего
+    /// не делает, пока его не нажали, а разрешения спрашиваются при первом нажатии.
+    public var dictationEnabled: Bool {
+        get { defaults.object(forKey: Key.dictation) == nil ? true : defaults.bool(forKey: Key.dictation) }
+        set { defaults.set(newValue, forKey: Key.dictation) }
+    }
+
+    /// Сочетание клавиш для диктовки. Хранится физическим кодом клавиши и carbon-масками
+    /// модификаторов: код не зависит от раскладки, поэтому под русской раскладкой
+    /// сочетание не переезжает на другую клавишу.
+    public var dictationHotKey: HotKey.Combo {
+        get {
+            guard defaults.object(forKey: Key.dictationKeyCode) != nil else {
+                return .controlOptionD
+            }
+            let combo = HotKey.Combo(
+                keyCode: UInt32(defaults.integer(forKey: Key.dictationKeyCode)),
+                modifiers: UInt32(defaults.integer(forKey: Key.dictationModifiers))
+            )
+            return combo.isValid ? combo : .controlOptionD
+        }
+        set {
+            guard newValue.isValid else { return }
+            defaults.set(Int(newValue.keyCode), forKey: Key.dictationKeyCode)
+            defaults.set(Int(newValue.modifiers), forKey: Key.dictationModifiers)
+        }
     }
 
     /// Устройство для диаризации: 'mps' (быстро, Apple Silicon) или 'cpu'.

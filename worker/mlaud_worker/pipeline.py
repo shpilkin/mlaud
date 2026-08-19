@@ -205,7 +205,8 @@ def process_inbox(cfg: Config, transcriber: Optional[Transcriber] = None,
                   notifier=None, use_lock: bool = True, diarizer=None) -> dict:
     """Обработать весь inbox пакетом. Возвращает {'processed': [...], 'errors': [...]}."""
     cfg.ensure_dirs()
-    results = {"processed": [], "errors": [], "redelivered": [], "pending": []}
+    results = {"processed": [], "errors": [], "redelivered": [], "pending": [],
+               "given_up": []}
 
     def _run():
         nonlocal transcriber, diarizer
@@ -214,6 +215,7 @@ def process_inbox(cfg: Config, transcriber: Optional[Transcriber] = None,
         # чисто «досыльным» (inbox пуст, но в очереди висит недоставленное).
         flushed = delivery_queue.flush(cfg, notifier, _deliver)
         results["redelivered"] = flushed["resent"]
+        results["given_up"] = flushed.get("given_up", [])
         files = list_audio(cfg)
         if files:
             transcriber = transcriber or Transcriber(model_type=cfg.model_type)

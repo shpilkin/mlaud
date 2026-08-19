@@ -47,7 +47,7 @@ Niti:                          инбокс → Meeting → классифика
   "transcript_path": "ASROutput/AllOutputs/2026-08/2026-08-16_14-30-05.txt",
   "srt_path":        "ASROutput/AllOutputs/2026-08/2026-08-16_14-30-05.srt",
   "audio_path":      "Processed/AllRecords/2026-08/2026-08-16_14-30-05.m4a",
-  "source": "mlaud/0.4.4"
+  "source": "mlaud"
 }
 ```
 

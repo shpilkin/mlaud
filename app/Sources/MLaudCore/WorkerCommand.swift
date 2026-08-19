@@ -10,23 +10,28 @@ public struct WorkerCommand {
     /// Доп. каталоги для PYTHONPATH (например, вложенный в .app site-packages).
     public var additionalPythonPath: [URL]
     public var extraEnvironment: [String: String]
+    /// Запускаемый модуль. Пакетная обработка — `mlaud_worker`, диктовка —
+    /// `mlaud_worker.dictate` (резидентный процесс с загруженной моделью).
+    public var module: String
 
     public init(
         pythonExecutable: URL,
         workerDirectory: URL,
         inboxFolder: URL,
         additionalPythonPath: [URL] = [],
-        extraEnvironment: [String: String] = [:]
+        extraEnvironment: [String: String] = [:],
+        module: String = "mlaud_worker"
     ) {
         self.pythonExecutable = pythonExecutable
         self.workerDirectory = workerDirectory
         self.inboxFolder = inboxFolder
         self.additionalPythonPath = additionalPythonPath
         self.extraEnvironment = extraEnvironment
+        self.module = module
     }
 
     public func arguments() -> [String] {
-        ["-m", "mlaud_worker"]
+        ["-m", module]
     }
 
     /// Окружение для процесса: выбранная папка как MLAUD_INBOX + PYTHONPATH + доп. переменные.

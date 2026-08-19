@@ -1,3 +1,5 @@
+import AppKit
+import Carbon.HIToolbox
 import Foundation
 import MLaudCore
 
@@ -287,6 +289,126 @@ test("FolderWatcher: start на несуществующей папке возв
     let w = FolderWatcher(url: missing) { }
     check(!w.start(), "start() == false для отсутствующей папки")
     check(!w.isWatching, "не следит")
+}
+
+// MARK: - Диктовка: протокол резидентного процесса
+
+test("DictationEvent: разбор событий") {
+    check(DictationEvent.parse(line: #"{"t":"ready"}"#) == .ready, "ready")
+    check(DictationEvent.parse(line: #"{"t":"commit","text":"привет"}"#) == .commit("привет"), "commit")
+    check(DictationEvent.parse(line: #"{"t":"preview","text":"мир"}"#) == .preview("мир"), "preview")
+    check(DictationEvent.parse(line: #"{"t":"error","message":"ой"}"#) == .error("ой"), "error")
+}
+
+test("DictationEvent: мусор в stdout игнорируется, а не роняет сессию") {
+    check(DictationEvent.parse(line: "UserWarning: torchaudio deprecated") == nil, "не JSON — nil")
+    check(DictationEvent.parse(line: #"{"t":"неизвестно"}"#) == nil, "чужой тип — nil")
+    check(DictationEvent.parse(line: #"{"нет":"t"}"#) == nil, "без поля t — nil")
+}
+
+test("DictationCommand: строки протокола") {
+    check(DictationCommand.flush.line() == #"{"t":"flush"}"#, "flush")
+    check(DictationCommand.quit.line() == #"{"t":"quit"}"#, "quit")
+    let audio = DictationCommand.audio(Data([0x01, 0x02])).line()
+    check(audio == #"{"t":"audio","pcm":"AQI="}"#, "audio в base64")
+    check(DictationCommand.flush.data().last == UInt8(ascii: "\n"), "команда заканчивается переводом строки")
+}
+
+test("LineBuffer: склеивает JSON, разрезанный пайпом пополам") {
+    var buf = LineBuffer()
+    check(buf.append(Data(#"{"t":"comm"#.utf8)).isEmpty, "неполная строка не отдаётся")
+    let lines = buf.append(Data("it\"}\n".utf8))
+    check(lines == [#"{"t":"commit"}"#], "склеилась после прихода хвоста")
+}
+
+test("LineBuffer: несколько строк в одном куске") {
+    var buf = LineBuffer()
+    let lines = buf.append(Data("{\"a\":1}\n{\"b\":2}\n{\"c\"".utf8))
+    check(lines.count == 2, "отданы обе целые строки, огрызок придержан")
+    check(buf.append(Data(":3}\n".utf8)) == [#"{"c":3}"#], "огрызок дособрался")
+}
+
+test("TextJoiner: пробелы между кусками, но не перед запятой") {
+    var j = TextJoiner()
+    check(j.next("Так,") == "Так,", "первый кусок без ведущего пробела")
+    check(j.next("погнали.") == " погнали.", "дальше — с пробелом")
+    check(j.next(",") == ",", "знак препинания приклеивается")
+    check(j.next("   ") == "", "пустой кусок ничего не печатает")
+}
+
+test("TextJoiner: reset начинает новую диктовку без ведущего пробела") {
+    var j = TextJoiner()
+    _ = j.next("раз")
+    j.reset()
+    check(j.next("два") == "два", "после reset снова без пробела")
+}
+
+test("TextInserter: длинный текст режется по символам, не по UTF-16") {
+    let parts = TextInserter.split("привет мир как дела друг", limit: 8)
+    check(parts.joined() == "привет мир как дела друг", "склейка даёт исходный текст")
+    check(parts.allSatisfy { $0.utf16.count <= 8 }, "каждый кусок влезает в лимит события")
+    let emoji = TextInserter.split("аб😀вг", limit: 3)
+    check(emoji.joined() == "аб😀вг", "суррогатная пара не разорвана")
+    check(emoji.allSatisfy { $0.utf16.count <= 3 }, "лимит соблюдён и на эмодзи")
+}
+
+test("WorkerCommand: модуль диктовки подставляется в аргументы") {
+    let c = WorkerCommand(pythonExecutable: URL(fileURLWithPath: "/py"),
+                          workerDirectory: URL(fileURLWithPath: "/w"),
+                          inboxFolder: URL(fileURLWithPath: "/in"),
+                          module: "mlaud_worker.dictate")
+    check(c.arguments() == ["-m", "mlaud_worker.dictate"], "аргументы модуля диктовки")
+}
+
+// MARK: - Горячая клавиша
+
+test("Combo: перевод модификаторов Cocoa → Carbon") {
+    // Наборы битов разные; ошибка здесь зарегистрировала бы не то сочетание.
+    let flags = NSEvent.ModifierFlags([.control, .option]).rawValue
+    let mods = HotKey.Combo.carbonModifiers(fromCocoa: flags)
+    check(mods == UInt32(controlKey | optionKey), "⌃⌥ переведены верно")
+
+    let all = NSEvent.ModifierFlags([.control, .option, .shift, .command]).rawValue
+    check(HotKey.Combo.carbonModifiers(fromCocoa: all)
+          == UInt32(controlKey | optionKey | shiftKey | cmdKey), "все четыре модификатора")
+
+    let capsOnly = NSEvent.ModifierFlags([.capsLock]).rawValue
+    check(HotKey.Combo.carbonModifiers(fromCocoa: capsOnly) == 0, "capsLock не модификатор хоткея")
+}
+
+test("Combo: подпись сочетания в порядке macOS") {
+    check(HotKey.Combo.controlOptionD.display == "⌃⌥D", "⌃⌥D")
+    let all = HotKey.Combo(keyCode: UInt32(kVK_Space),
+                           modifiers: UInt32(cmdKey | shiftKey | optionKey | controlKey))
+    check(all.display == "⌃⌥⇧⌘Space", "порядок ⌃⌥⇧⌘, получили \(all.display)")
+}
+
+test("Combo: без модификатора невалидно, функциональная клавиша — валидна") {
+    check(!HotKey.Combo(keyCode: UInt32(kVK_ANSI_D), modifiers: 0).isValid,
+          "голая буква перехватывала бы обычный ввод")
+    check(HotKey.Combo(keyCode: UInt32(kVK_F13), modifiers: 0).isValid, "F13 сама по себе годится")
+    check(HotKey.Combo(keyCode: UInt32(kVK_ANSI_D), modifiers: UInt32(cmdKey)).isValid, "⌘D годится")
+}
+
+test("KeyNames: физическая клавиша, а не символ раскладки") {
+    check(KeyNames.name(for: UInt32(kVK_ANSI_D)) == "D", "D")
+    check(KeyNames.name(for: UInt32(kVK_Space)) == "Space", "Space")
+    check(KeyNames.name(for: UInt32(kVK_F13)) == "F13", "F13")
+    check(KeyNames.name(for: 999).hasPrefix("код"), "неизвестный код не падает")
+}
+
+test("HotKey: регистрация и снятие свободной комбинации") {
+    let key = HotKey(combo: HotKey.Combo(keyCode: UInt32(kVK_F19),
+                                         modifiers: UInt32(controlKey | optionKey | shiftKey))) { }
+    check(key.start(), "свободная комбинация занялась")
+    check(key.isRegistered, "isRegistered == true")
+    let second = HotKey(combo: HotKey.Combo(keyCode: UInt32(kVK_F19),
+                                            modifiers: UInt32(controlKey | optionKey | shiftKey))) { }
+    check(!second.start(), "повторная регистрация той же комбинации отклонена")
+    key.stop()
+    check(!key.isRegistered, "после stop() освобождена")
+    check(second.start(), "теперь её можно занять заново")
+    second.stop()
 }
 
 // MARK: summary
