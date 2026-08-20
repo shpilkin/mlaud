@@ -42,9 +42,16 @@ final class DictationController {
     private var stdinPipe: Pipe?
     private var lineBuffer = LineBuffer()
     private var idleTimer: Timer?
+    private var watchdog: Timer?
+    private var stalls = 0
 
     /// Сколько процесс с моделью живёт без дела, прежде чем освободить память.
     private let idleTimeout: TimeInterval = 300
+    /// Столько тишины в приходе буферов считаем поломкой захвата. Не путать с тишиной
+    /// в звуке: молчащий микрофон всё равно шлёт буферы, а сломанный тап не шлёт ничего.
+    private let stallTimeout: TimeInterval = 4
+    /// Ниже этой доли реального времени звук считаем негодным.
+    private let minThroughput: Double = 0.5
 
     private let ioQueue = DispatchQueue(label: "mlaud.dictation.io")
 
@@ -102,6 +109,9 @@ final class DictationController {
 
     /// Закончить фразу: остановить микрофон, дослать хвост, оставить процесс тёплым.
     private func finish() {
+        watchdog?.invalidate()
+        watchdog = nil
+        stalls = 0
         capture?.stop()
         capture = nil
         send(.flush)
@@ -158,6 +168,8 @@ final class DictationController {
             if !piece.isEmpty { inserter.type(piece) }
         case .preview(let text):
             preview = text
+        case .stat(let reason, let windowSec, let decodes):
+            DictationLog.write("фраза закрыта: \(reason), окно \(windowSec) с, разборов \(decodes)")
         case .error(let message):
             onError?(message)
         }
@@ -167,6 +179,8 @@ final class DictationController {
         process = nil
         stdinPipe = nil
         lineBuffer = LineBuffer()
+        watchdog?.invalidate()
+        watchdog = nil
         if state != .off {
             capture?.stop()
             capture = nil
@@ -191,13 +205,83 @@ final class DictationController {
         let capture = AudioCapture { [weak self] pcm in
             self?.send(.audio(pcm))
         }
-        do {
-            try capture.start()
-            self.capture = capture
-        } catch {
-            state = .off
-            onError?(error.localizedDescription)
+        capture.onReconfigured = { DictationLog.write($0) }
+        capture.onFailure = { [weak self] message in
+            DictationLog.write("захват не восстановился: \(message)")
+            self?.failCapture(message)
         }
+        self.capture = capture
+        stalls = 0
+        // Запуск асинхронный: обращение к аудиоустройству уходит в coreaudiod и может
+        // висеть секундами. В главном потоке этого делать нельзя — встанет всё
+        // приложение вместе с горячей клавишей и меню.
+        capture.start { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.capture = nil
+                self.state = .off
+                self.onError?(error.localizedDescription)
+                return
+            }
+            self.startWatchdog()
+        }
+    }
+
+    /// Сторож приходящего звука.
+    ///
+    /// Уведомление о смене конфигурации приходит не всегда: движок может замолчать так,
+    /// что объект цел и жалоб нет — приложение показывает «слушаю», распознаватель ждёт
+    /// данных на stdin, и оба считают, что всё в порядке. Единственный надёжный признак —
+    /// буферы перестали приходить.
+    private func startWatchdog() {
+        watchdog?.invalidate()
+        watchdog = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.checkAudioFlow()
+        }
+    }
+
+    private func checkAudioFlow() {
+        guard state == .listening, let capture, let last = capture.lastBufferAt else { return }
+
+        let silentFor = Date().timeIntervalSince(last)
+        let throughput = capture.throughput
+        // Мало проверять, что буферы приходят. После смены устройства тап оставался
+        // настроен под прежнюю частоту и отдавал шестую часть реального времени —
+        // «звук идёт», а распознавать нечего. Поэтому сверяем и объём.
+        let reason: String
+        if silentFor > stallTimeout {
+            reason = "буферы не приходят \(Int(silentFor)) с"
+        } else if let throughput, throughput < minThroughput {
+            reason = "звука приходит \(Int(throughput * 100))% от реального времени"
+        } else {
+            stalls = 0
+            return
+        }
+
+        stalls += 1
+        DictationLog.write("захват нездоров (\(reason)) — попытка \(stalls) пересобрать")
+        guard stalls <= 2 else {
+            failCapture("микрофон не восстановился: \(reason)")
+            return
+        }
+        capture.restart { [weak self] ok in
+            guard let self, !ok else { return }
+            self.failCapture("микрофон не восстановился: \(reason)")
+        }
+    }
+
+    /// Захват мёртв: честно выключаемся, а не изображаем, что слушаем.
+    private func failCapture(_ message: String) {
+        watchdog?.invalidate()
+        watchdog = nil
+        capture?.stop()
+        capture = nil
+        send(.reset)
+        preview = ""
+        state = .off
+        stalls = 0
+        scheduleIdleShutdown()
+        onError?(message)
     }
 
     // MARK: - Освобождение памяти
@@ -212,6 +296,8 @@ final class DictationController {
     func shutdown() {
         idleTimer?.invalidate()
         idleTimer = nil
+        watchdog?.invalidate()
+        watchdog = nil
         capture?.stop()
         capture = nil
         guard let process, process.isRunning else {

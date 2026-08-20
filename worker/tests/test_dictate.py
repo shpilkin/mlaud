@@ -137,6 +137,35 @@ def test_session_flush_is_idempotent_on_empty_window():
     assert s.flush() == []
 
 
+
+def test_stat_reports_how_the_phrase_closed():
+    """Пауза и упор в предел окна — разные события, и различать их важно."""
+    dec = FakeDecoder({0.0: "раз два"})
+    s = d.DictationSession(dec, decode_every_sec=0.4,
+                           vad=d.SilenceDetector(hold_sec=0.4))
+    s.feed(_speech(0.4))
+    stats = [e for e in s.feed(_silence(0.5)) if e["t"] == "stat"]
+    assert stats and stats[0]["reason"] == "silence"
+
+    s2 = d.DictationSession(dec, decode_every_sec=0.4, max_window_sec=1.0,
+                            vad=d.SilenceDetector(hold_sec=99))
+    s2.feed(_speech(0.5))
+    stats2 = [e for e in s2.feed(_speech(0.6)) if e["t"] == "stat"]
+    assert stats2 and stats2[0]["reason"] == "overflow"
+    assert stats2[0]["window_sec"] > 1.0    # окно доросло до предела
+    assert stats2[0]["decodes"] >= 1        # и каждый разбор стоил как целое окно
+
+
+def test_stat_counters_reset_between_phrases():
+    dec = FakeDecoder({0.0: "раз"})
+    s = d.DictationSession(dec, decode_every_sec=0.4,
+                           vad=d.SilenceDetector(hold_sec=0.4))
+    s.feed(_speech(0.4)); s.feed(_silence(0.5))
+    s.feed(_speech(0.4))
+    stats = [e for e in s.feed(_silence(0.5)) if e["t"] == "stat"]
+    assert stats[0]["window_sec"] < 1.5  # окно новой фразы, а не накопленное
+
+
 # --- протокол ------------------------------------------------------------------
 
 def _pcm(samples: np.ndarray) -> str:

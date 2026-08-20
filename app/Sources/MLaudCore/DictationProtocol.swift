@@ -6,6 +6,9 @@ public enum DictationEvent: Equatable {
     case commit(String)
     case preview(String)
     case error(String)
+    /// Как закрылась фраза: паузой или упором в предел окна, и во сколько разборов
+    /// это обошлось. Не влияет на текст — нужно, чтобы видеть, что происходит.
+    case stat(reason: String, windowSec: Double, decodes: Int)
 
     /// Разбор одной строки stdout. nil — строка не из протокола (предупреждения
     /// библиотек тоже летят в stdout, ронять на них сессию нельзя).
@@ -19,6 +22,10 @@ public enum DictationEvent: Equatable {
         case "commit":  return .commit(obj["text"] as? String ?? "")
         case "preview": return .preview(obj["text"] as? String ?? "")
         case "error":   return .error(obj["message"] as? String ?? "")
+        case "stat":
+            return .stat(reason: obj["reason"] as? String ?? "?",
+                         windowSec: obj["window_sec"] as? Double ?? 0,
+                         decodes: obj["decodes"] as? Int ?? 0)
         default:        return nil
         }
     }

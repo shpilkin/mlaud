@@ -17,6 +17,7 @@ RSS), иначе первое слово ждёт две секунды.
   → {"t":"commit","text":"…"}              текст устоялся, его можно печатать
   → {"t":"preview","text":"…"}             хвост ещё может перепишаться
   → {"t":"error","message":"…"}
+  → {"t":"stat","reason":"silence|overflow","window_sec":…,"decodes":…}
 """
 
 import base64
@@ -155,6 +156,7 @@ class DictationSession:
         self.vad = vad if vad is not None else SilenceDetector(sr=sr)
         self._window = np.zeros(0, dtype=np.float32)
         self._undecoded = 0
+        self._decodes = 0
 
     def feed(self, samples: np.ndarray) -> list[dict]:
         """Добавить кусок звука. Вернуть события для отправки наверх."""
@@ -165,11 +167,15 @@ class DictationSession:
         end_of_phrase = self.vad.feed(samples)
         overflow = self._window.size >= self.max_window
         if end_of_phrase or overflow:
-            events.extend(self.flush())
+            # Чем закрылась фраза — паузой или упором в предел окна. Разница важна:
+            # если пауз не находится, окно всегда доходит до максимума и каждый разбор
+            # стоит как самый дорогой, а текст приходит редкими кусками.
+            events.extend(self.flush(reason="silence" if end_of_phrase else "overflow"))
             return events
 
         if self._undecoded >= self.decode_every:
             self._undecoded = 0
+            self._decodes += 1
             text = self.decode(self._window)
             committed = self.tracker.update(text)
             if committed:
@@ -177,20 +183,25 @@ class DictationSession:
             events.append({"t": "preview", "text": self.tracker.preview()})
         return events
 
-    def flush(self) -> list[dict]:
+    def flush(self, reason: str = "manual") -> list[dict]:
         """Досказать всё до конца и начать новое окно."""
         events: list[dict] = []
         if self._window.size:
+            window_sec = round(self._window.size / self.sr, 1)
+            decodes = self._decodes
             rest = self.tracker.finalize(self.decode(self._window))
             if rest:
                 events.append({"t": "commit", "text": rest})
                 events.append({"t": "preview", "text": ""})
+            events.append({"t": "stat", "reason": reason,
+                           "window_sec": window_sec, "decodes": decodes})
         self.reset()
         return events
 
     def reset(self) -> None:
         self._window = np.zeros(0, dtype=np.float32)
         self._undecoded = 0
+        self._decodes = 0
         self.tracker.reset()
         self.vad.reset()
 
