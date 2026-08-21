@@ -423,6 +423,74 @@ test("WorkerCommand: ничего не пишется внутрь бандла"
     }
 }
 
+// MARK: - Пересборка захвата при смене устройства
+
+test("RebuildPolicy: то же устройство — пересобирать нечего") {
+    check(RebuildPolicy.decide(changed: false, sinceLastRebuild: nil, rebuildsInBurst: 0)
+          == .unchanged, "устройство не менялось")
+    check(RebuildPolicy.decide(changed: true, sinceLastRebuild: nil, rebuildsInBurst: 0)
+          == .rebuild, "сменилось — пересобираем")
+}
+
+test("RebuildPolicy: замкнутый круг разрывается паузой") {
+    // Своя же пересборка останавливает запись, гарнитура уходит в другой профиль и
+    // присылает новое уведомление. Без паузы это крутилось раз в две секунды.
+    check(RebuildPolicy.decide(changed: true, sinceLastRebuild: 1.0, rebuildsInBurst: 1)
+          == .cooldown, "через секунду после пересборки не реагируем")
+    check(RebuildPolicy.decide(changed: true, sinceLastRebuild: 5.0, rebuildsInBurst: 1)
+          == .rebuild, "после паузы — можно")
+}
+
+test("RebuildPolicy: мечущееся устройство перестаём догонять") {
+    check(RebuildPolicy.decide(changed: true, sinceLastRebuild: 5.0, rebuildsInBurst: 3)
+          == .tooManyRebuilds, "три пересборки подряд — хватит")
+    check(RebuildPolicy.decide(changed: true, sinceLastRebuild: 60.0, rebuildsInBurst: 3)
+          == .rebuild, "но через минуту тишины серия считается законченной")
+}
+
+test("RebuildPolicy: череда уведомлений не зацикливается") {
+    // Проигрываем реальную частоту событий из журнала: раз в две секунды.
+    var since: TimeInterval? = nil
+    var burst = 0
+    var rebuilds = 0
+    for _ in 0..<12 {
+        switch RebuildPolicy.decide(changed: true, sinceLastRebuild: since, rebuildsInBurst: burst) {
+        case .rebuild:
+            rebuilds += 1; burst += 1; since = 0
+        default:
+            since = (since ?? 0) + 2
+        }
+    }
+    check(rebuilds <= 3, "двенадцать уведомлений дали не больше трёх пересборок, получили \(rebuilds)")
+}
+
+test("AudioCapture: вход по умолчанию определяется и называется") {
+    // Движок сам на Bluetooth-гарнитуру не переезжает, поэтому устройство задаётся
+    // явно — значит запрос к CoreAudio обязан работать.
+    guard let device = AudioCapture.defaultInputDevice() else {
+        check(false, "устройство ввода по умолчанию не определилось")
+        return
+    }
+    let name = AudioCapture.deviceName(device)
+    check(!name.isEmpty, "у устройства есть имя: \(name)")
+    check(!name.hasPrefix("устройство "), "имя настоящее, а не запасное: \(name)")
+    print("    (текущий вход: \(name))")
+}
+
+test("AudioCapture: частота устройства спрашивается у CoreAudio") {
+    // Истина, с которой сверяется движок: он умеет держать формат прежнего входа,
+    // и без этой сверки в наушниках получался запуск на несуществующей частоте.
+    guard let device = AudioCapture.defaultInputDevice() else {
+        check(false, "нет устройства ввода"); return
+    }
+    guard let rate = AudioCapture.nominalSampleRate(device) else {
+        check(false, "частота устройства не прочиталась"); return
+    }
+    check(rate > 0, "частота положительная: \(Int(rate)) Гц")
+    check(rate >= 8000 && rate <= 192000, "частота правдоподобная: \(Int(rate)) Гц")
+    print("    (вход \(AudioCapture.deviceName(device)) на \(Int(rate)) Гц)")
+}
+
 // MARK: summary
 
 print("\n==== Swift tests: \(passed) passed, \(failed) failed ====")

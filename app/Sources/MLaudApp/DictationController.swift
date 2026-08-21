@@ -205,6 +205,7 @@ final class DictationController {
         let capture = AudioCapture { [weak self] pcm in
             self?.send(.audio(pcm))
         }
+        capture.onDiagnostic = { DictationLog.write($0) }
         capture.onReconfigured = { DictationLog.write($0) }
         capture.onFailure = { [weak self] message in
             DictationLog.write("захват не восстановился: \(message)")
@@ -253,6 +254,11 @@ final class DictationController {
             reason = "буферы не приходят \(Int(silentFor)) с"
         } else if let throughput, throughput < minThroughput {
             reason = "звука приходит \(Int(throughput * 100))% от реального времени"
+        } else if throughput == nil {
+            // Судить ещё рано (захват только поднялся). Счётчик попыток НЕ сбрасываем:
+            // иначе после каждой пересборки он обнулялся, эскалация не наступала
+            // никогда, и в журнале бесконечно повторялась «попытка 1».
+            return
         } else {
             stalls = 0
             return
