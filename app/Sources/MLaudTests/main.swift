@@ -493,5 +493,55 @@ test("AudioCapture: частота устройства спрашивается
 
 // MARK: summary
 
+// MARK: - Сопряжение с телефоном
+
+test("PhoneSyncPairingStore: создаёт секрет и переиспользует его") {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = PhoneSyncPairingStore(url: directory.appendingPathComponent("sync/pairing.json"))
+
+    let first = try store.loadOrCreate()
+    eq(first.psk.count, PhoneSyncPairing.pskByteCount, "длина секрета")
+
+    let second = try store.loadOrCreate()
+    eq(second.psk, first.psk, "повторный вызов не должен менять секрет")
+    eq(second.serverID, first.serverID, "идентификатор сервера постоянный")
+}
+
+test("PhoneSyncPairingStore: файл секрета закрыт от чужих") {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("sync/pairing.json")
+    let store = PhoneSyncPairingStore(url: url)
+    _ = try store.loadOrCreate()
+
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0
+    // Секрет даёт доступ ко всем записям — читать его должен только владелец.
+    eq(permissions, 0o600, "права на файл секрета")
+}
+
+test("PhoneSyncPairingStore: смена кода даёт новый секрет") {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = PhoneSyncPairingStore(url: directory.appendingPathComponent("sync/pairing.json"))
+
+    let before = try store.loadOrCreate()
+    let after = try store.regenerate()
+    check(after.psk != before.psk, "секрет обязан смениться")
+    check(store.load()?.psk == after.psk, "новый секрет должен сохраниться")
+}
+
+test("SettingsStore: приём с телефона по умолчанию выключен") {
+    let settings = SettingsStore(defaults: makeDefaults())
+    check(!settings.phoneSyncEnabled, "по умолчанию выключено")
+    settings.phoneSyncEnabled = true
+    check(settings.phoneSyncEnabled, "значение сохраняется")
+}
+
+
 print("\n==== Swift tests: \(passed) passed, \(failed) failed ====")
 exit(failed == 0 ? 0 : 1)

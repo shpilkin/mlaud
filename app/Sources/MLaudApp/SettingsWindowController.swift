@@ -5,6 +5,7 @@ import MLaudCore
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let settings: SettingsStore
     private let onSave: () -> Void
+    private let onShowPairingCode: () -> Void
 
     private let tokenField = NSTextField()
     private let chatField = NSTextField()
@@ -14,14 +15,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let notifyCheck = NSButton(checkboxWithTitle: "Системные уведомления о готовности/ошибке", target: nil, action: nil)
     private let diarizeCheck = NSButton(checkboxWithTitle: "Диаризация (определять спикеров, pyannote)", target: nil, action: nil)
     private let dictationCheck = NSButton(checkboxWithTitle: "Диктовка по горячей клавише", target: nil, action: nil)
+    private let phoneSyncCheck = NSButton(checkboxWithTitle: "Принимать записи с iPhone", target: nil, action: nil)
+    private lazy var pairingButton = NSButton(
+        title: "Показать код связи…", target: self, action: #selector(showPairingCode)
+    )
     private lazy var hotKeyRecorder = HotKeyRecorder(combo: settings.dictationHotKey)
     private let hfField = NSTextField()
     private let speakersField = NSTextField()
     private let devicePopup = NSPopUpButton()
 
-    init(settings: SettingsStore, onSave: @escaping () -> Void) {
+    init(
+        settings: SettingsStore,
+        onShowPairingCode: @escaping () -> Void = {},
+        onSave: @escaping () -> Void
+    ) {
         self.settings = settings
         self.onSave = onSave
+        self.onShowPairingCode = onShowPairingCode
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
             styleMask: [.titled, .closable, .resizable],
@@ -84,6 +94,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [label("HF-токен:"), hfField, hint("для скачивания весов pyannote с huggingface.co; нужен один раз")],
             [label("Число спикеров:"), speakersField, hint("0 = определить авто; N — если точно знаешь сколько говорящих")],
             [label("Устройство диаризации:"), devicePopup, hint("mps — GPU Apple, ~22× быстрее; cpu — запасной")],
+            [NSGridCell.emptyContentView, phoneSyncCheck, hint("прямой приём по локальной сети — замена транзиту через iCloud")],
+            [NSGridCell.emptyContentView, pairingButton, hint("QR-код: отсканировать один раз в MLaud на телефоне")],
         ])
         grid.translatesAutoresizingMaskIntoConstraints = false
         grid.rowSpacing = 12
@@ -128,6 +140,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hfField.stringValue = settings.hfToken
         speakersField.stringValue = settings.numSpeakers > 0 ? String(settings.numSpeakers) : ""
         devicePopup.selectItem(withTitle: settings.diarizeDevice)
+        phoneSyncCheck.state = settings.phoneSyncEnabled ? .on : .off
+    }
+
+    @objc private func showPairingCode() {
+        onShowPairingCode()
     }
 
     @objc private func save() {
@@ -142,6 +159,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         settings.hfToken = hfField.stringValue
         settings.numSpeakers = Int(speakersField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         settings.diarizeDevice = devicePopup.titleOfSelectedItem ?? SettingsStore.defaultDevice
+        settings.phoneSyncEnabled = phoneSyncCheck.state == .on
 
         if settings.diarizeEnabled && settings.hfToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let alert = NSAlert()

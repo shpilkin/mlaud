@@ -14,6 +14,7 @@ public final class SettingsStore {
         public static let numSpeakers = "numSpeakers"
         public static let diarizeDevice = "diarizeDevice"
         public static let dictation = "dictationEnabled"
+        public static let phoneSync = "phoneSyncEnabled"
         public static let dictationKeyCode = "dictationKeyCode"
         public static let dictationModifiers = "dictationModifiers"
     }
@@ -78,6 +79,12 @@ public final class SettingsStore {
 
     /// Диктовка по горячей клавише (⌃⌥D). По умолчанию включено: сам хоткей ничего
     /// не делает, пока его не нажали, а разрешения спрашиваются при первом нажатии.
+    /// Приём записей с iPhone по локальной сети (замена транзита через iCloud).
+    public var phoneSyncEnabled: Bool {
+        get { defaults.object(forKey: Key.phoneSync) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: Key.phoneSync) }
+    }
+
     public var dictationEnabled: Bool {
         get { defaults.object(forKey: Key.dictation) == nil ? true : defaults.bool(forKey: Key.dictation) }
         set { defaults.set(newValue, forKey: Key.dictation) }

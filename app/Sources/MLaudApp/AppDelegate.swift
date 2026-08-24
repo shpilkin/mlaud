@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var watcher: FolderWatcher?
     private var debounceWork: DispatchWorkItem?
     private var settingsWindow: SettingsWindowController?
+    private var pairingWindow: PairingWindowController?
+    private lazy var phoneSync = PhoneSyncController(serviceDirectory: serviceDirectory)
     private var dictation: DictationController?
     private var hotKey: HotKey?
     /// Не удалось занять сочетание: показываем прямо в меню, иначе диктовка выглядит
@@ -60,10 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("ASR/ASROutput/AllOutputs")
     }
+    /// Служебная папка приложения: логи, состояние, данные приёма с телефона.
+    private var serviceDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("ASR/service")
+    }
+
     /// Лог worker'а: stdout+stderr Python-процесса. Без него ошибки невидимы (exit-код без причины).
     private var workerLogURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("ASR/service/worker.log")
+        serviceDirectory.appendingPathComponent("worker.log")
     }
 
     /// В очереди на доставку есть недоставленные транскрипты (сеть падала при обработке).
@@ -97,6 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         restartWatcher()
         restartDictation()
+        restartPhoneSync()
         refresh()
         autoProcess()  // подхватить файлы, накопившиеся пока приложение не работало
     }
@@ -124,6 +131,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let folderLine = NSMenuItem(title: "Папка: \(folderPath)", action: nil, keyEquivalent: "")
         folderLine.isEnabled = false
         menu.addItem(folderLine)
+
+        if settings.phoneSyncEnabled {
+            var title = phoneSync.state.menuTitle
+            if let last = phoneSync.lastReceived {
+                let time = DateFormatter.localizedString(from: last.at, dateStyle: .none, timeStyle: .short)
+                title += " · последняя \(time)"
+            }
+            let syncLine = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            syncLine.isEnabled = false
+            menu.addItem(syncLine)
+        }
 
         menu.addItem(.separator())
 
@@ -217,15 +235,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             folderStore.inboxFolder = url
             status = .idle
             restartWatcher()
+            // Приёмник держит папку в своей конфигурации: без перезапуска принятое
+            // с телефона уедет в прежний inbox, за которым уже никто не следит.
+            restartPhoneSync()
             autoProcess()
         }
     }
 
     @objc private func openSettings() {
         if settingsWindow == nil {
-            settingsWindow = SettingsWindowController(settings: settings) { [weak self] in
+            settingsWindow = SettingsWindowController(
+                settings: settings,
+                onShowPairingCode: { [weak self] in self?.showPairingCode() }
+            ) { [weak self] in
                 self?.restartWatcher()    // применить изменения мгновенной обработки
                 self?.restartDictation()  // ... и включение/выключение диктовки
+                self?.restartPhoneSync()  // ... и приёма с телефона
                 self?.refresh()
             }
         }
@@ -233,6 +258,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow?.showWindow(nil)
         settingsWindow?.window?.center()
         settingsWindow?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: - Приём с iPhone
+
+    private func restartPhoneSync() {
+        guard settings.phoneSyncEnabled else {
+            phoneSync.stop()
+            return
+        }
+        phoneSync.onStateChanged = { [weak self] in self?.refresh() }
+        phoneSync.onReceived = { [weak self] name in
+            guard let self else { return }
+            if self.settings.notificationsEnabled {
+                UserNotifier.notify(title: "MLaud — принято с iPhone", body: name)
+            }
+            // Не ждём FSEvents: файл уже целиком на месте, обработку можно начинать сразу.
+            self.autoProcess()
+        }
+        phoneSync.start(inbox: folderStore.inboxFolder, serviceDirectory: serviceDirectory)
+    }
+
+    private func showPairingCode() {
+        do {
+            let code = try phoneSync.pairingCode()
+            let manual = try phoneSync.manualCode()
+            pairingWindow = PairingWindowController(code: code, manualCode: manual) { [weak self] in
+                try? self?.phoneSync.regeneratePairing()
+                self?.restartPhoneSync()
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            pairingWindow?.showWindow(nil)
+            pairingWindow?.window?.center()
+            pairingWindow?.window?.makeKeyAndOrderFront(nil)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Не удалось подготовить код связи"
+            alert.informativeText = "\(error)"
+            alert.runModal()
+        }
     }
 
     @objc private func autoProcess() {
