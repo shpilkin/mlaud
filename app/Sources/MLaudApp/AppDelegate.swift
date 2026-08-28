@@ -1,5 +1,6 @@
 import AppKit
 import MLaudCore
+import UserNotifications
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
@@ -14,6 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var debounceWork: DispatchWorkItem?
     private var settingsWindow: SettingsWindowController?
     private var pairingWindow: PairingWindowController?
+    private var notificationsWindow: NotificationsWindowController?
+    /// Журнал уведомлений: баннер исчезает через несколько секунд, прочитать
+    /// написанное нужно и позже.
+    private lazy var notifications = NotificationHistory(
+        url: serviceDirectory.appendingPathComponent("notifications.json"))
     private lazy var phoneSync = PhoneSyncController(serviceDirectory: serviceDirectory)
     private var dictation: DictationController?
     private var hotKey: HotKey?
@@ -83,6 +89,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return !arr.isEmpty
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Строго до конца запуска: иначе система не отдаст отклик на баннер,
+        // по которому кликнули, пока приложение поднималось.
+        UserNotifier.setDelegate(self)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status = folderStore.hasInboxFolder ? .idle : .noFolder
@@ -116,6 +128,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let symbol = dictation?.state == .off || dictation == nil ? "waveform" : "mic.fill"
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "MLaud")
             button.image?.isTemplate = true
+            // Бейдж непрочитанных: иначе о пропущенном баннере узнать неоткуда.
+            let unread = notifications.unreadCount
+            button.title = unread > 0 ? " \(unread)" : ""
+            button.imagePosition = unread > 0 ? .imageLeading : .imageOnly
         }
         statusItem.menu = buildMenu()
     }
@@ -158,6 +174,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem(title: "Открыть лог…",
                                 action: #selector(openWorkerLogFile), keyEquivalent: ""))
+
+        let unread = notifications.unreadCount
+        let notificationsTitle = unread > 0
+            ? "Уведомления (\(unread) \(unread % 10 == 1 && unread % 100 != 11 ? "новое" : "новых"))…"
+            : "Уведомления…"
+        menu.addItem(NSMenuItem(title: notificationsTitle,
+                                action: #selector(openNotifications), keyEquivalent: ""))
 
         if settings.dictationEnabled {
             menu.addItem(.separator())
@@ -270,9 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         phoneSync.onStateChanged = { [weak self] in self?.refresh() }
         phoneSync.onReceived = { [weak self] name in
             guard let self else { return }
-            if self.settings.notificationsEnabled {
-                UserNotifier.notify(title: "MLaud — принято с iPhone", body: name)
-            }
+            self.notify(title: "MLaud — принято с iPhone", body: name)
             // Не ждём FSEvents: файл уже целиком на месте, обработку можно начинать сразу.
             self.autoProcess()
         }
@@ -367,16 +388,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func notifyResult(_ result: ProcessingStatus, count: Int) {
-        guard settings.notificationsEnabled else { return }
         switch result {
         case .done:
-            UserNotifier.notify(title: "MLaud — готово",
-                                body: "Обработано файлов: \(count)")
+            notify(title: "MLaud — готово", body: "Обработано файлов: \(count)")
         case .error(let message):
-            UserNotifier.notify(title: "MLaud — ошибка", body: message)
+            notify(title: "MLaud — ошибка", body: message)
         default:
             break
         }
+    }
+
+    // MARK: - Уведомления
+
+    /// Единственная точка, через которую приложение сообщает о событии.
+    ///
+    /// В журнал пишем всегда, баннер показываем по настройке: галка «Системные
+    /// уведомления» управляет баннером, а не тем, помнит ли приложение, о чём
+    /// сообщало. Диспетчеризация на главный поток здесь, а не у вызывающих:
+    /// об ошибках сообщают и фоновые обработчики.
+    private func notify(title: String, body: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let record = self.notifications.append(title: title, body: body)
+            if self.settings.notificationsEnabled {
+                UserNotifier.notify(title: title, body: body,
+                                    identifier: record.id.uuidString)
+            }
+            self.notificationsWindow?.reload(revealing: nil)
+            self.refresh()
+        }
+    }
+
+    @objc private func openNotifications() { showNotifications(revealing: nil) }
+
+    private func showNotifications(revealing id: UUID?) {
+        if notificationsWindow == nil {
+            notificationsWindow = NotificationsWindowController(
+                history: notifications
+            ) { [weak self] in self?.refresh() }
+            notificationsWindow?.window?.center()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        notificationsWindow?.showWindow(nil)
+        notificationsWindow?.window?.makeKeyAndOrderFront(nil)
+        notificationsWindow?.reload(revealing: id)
+        refresh()
     }
 
     /// Открывает лог worker'а на дозапись, дописывая заголовок с временной меткой.
@@ -459,8 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         controller.onError = { [weak self] message in
             DictationLog.write("ОШИБКА: \(message)")
-            guard let self, self.settings.notificationsEnabled else { return }
-            UserNotifier.notify(title: "MLaud — диктовка", body: message)
+            self?.notify(title: "MLaud — диктовка", body: message)
         }
         dictation = controller
 
@@ -476,11 +531,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             hotKeyFailed = true
             DictationLog.write("НЕ УДАЛОСЬ занять \(combo.display) — комбинация занята")
-            if settings.notificationsEnabled {
-                UserNotifier.notify(
-                    title: "MLaud — диктовка",
-                    body: "\(combo.display) занято другим приложением; выбери другое сочетание в настройках")
-            }
+            notify(title: "MLaud — диктовка",
+                   body: "\(combo.display) занято другим приложением; выбери другое сочетание в настройках")
         }
     }
 
@@ -533,5 +585,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() {
         dictation?.shutdown()  // резидентная модель держит ~1.6 ГБ — отпускаем явно
         NSApp.terminate(nil)
+    }
+}
+
+// MARK: - Отклик на системный баннер
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    /// Баннер должен появляться, даже когда приложение активно (открыто окно
+    /// настроек): иначе сообщение исчезает вовсе.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    /// Клик по баннеру открывает журнал на этой же записи.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let isDefaultAction = response.actionIdentifier == UNNotificationDefaultActionIdentifier
+        let id = UUID(uuidString: response.notification.request.identifier)
+        DispatchQueue.main.async { [weak self] in
+            guard isDefaultAction else { return }
+            self?.showNotifications(revealing: id)
+        }
+        completionHandler()
     }
 }

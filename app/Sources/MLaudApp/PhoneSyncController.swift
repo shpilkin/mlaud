@@ -52,6 +52,13 @@ final class PhoneSyncController {
         state = .starting
         onStateChanged?()
 
+        let staging = (inbox ?? serviceDirectory).appendingPathComponent(".incoming")
+        // Брошенные куски убираем до старта: сервер сам их не тронет — он знает
+        // только про те, за которыми пришли.
+        DispatchQueue.global(qos: .utility).async {
+            PhoneSyncStaging.sweep(directory: staging)
+        }
+
         do {
             let pairing = try pairingStore.loadOrCreate()
             let configuration = SyncServer.Configuration(
@@ -63,7 +70,7 @@ final class PhoneSyncController {
                 // один том с итоговым файлом, а значит подмена атомарна: наблюдатель
                 // увидит сразу целый файл. Скрытые каталоги и Swift-сканер, и
                 // Python-воркер пропускают.
-                stagingDirectory: (inbox ?? serviceDirectory).appendingPathComponent(".incoming"),
+                stagingDirectory: staging,
                 ledgerURL: serviceDirectory.appendingPathComponent("sync/received.json")
             )
             let server = SyncServer(configuration: configuration)

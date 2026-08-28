@@ -29,14 +29,22 @@ enum UserNotifier {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    static func notify(title: String, body: String) {
+    /// Делегат нужен ради клика по баннеру: без него система просто активирует
+    /// приложение, а у менюбар-приложения активация ничего не показывает.
+    static func setDelegate(_ delegate: UNUserNotificationCenterDelegate) {
+        guard hasBundle else { return }
+        UNUserNotificationCenter.current().delegate = delegate
+    }
+
+    /// `identifier` — id записи в журнале: по нему клик по баннеру находит, что открыть.
+    static func notify(title: String, body: String, identifier: String = UUID().uuidString) {
         guard hasBundle else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
         let request = UNNotificationRequest(
-            identifier: UUID().uuidString, content: content, trigger: nil)
+            identifier: identifier, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 }

@@ -543,5 +543,115 @@ test("SettingsStore: приём с телефона по умолчанию вы
 }
 
 
+// MARK: - Журнал уведомлений
+
+func makeJournalURL() throws -> URL {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    return directory.appendingPathComponent("notifications.json")
+}
+
+test("NotificationHistory: пустой журнал") {
+    let url = try makeJournalURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let history = NotificationHistory(url: url)
+    eq(history.records.count, 0, "записей нет")
+    eq(history.unreadCount, 0, "непрочитанных нет")
+}
+
+test("NotificationHistory: новое сверху и считается непрочитанным") {
+    let url = try makeJournalURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let history = NotificationHistory(url: url)
+    history.append(title: "первое", body: "a")
+    history.append(title: "второе", body: "b")
+    eq(history.records.map(\.title), ["второе", "первое"], "новые сверху")
+    eq(history.unreadCount, 2, "оба непрочитаны")
+}
+
+test("NotificationHistory: прочитанное помечается и переживает перезапуск") {
+    let url = try makeJournalURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let history = NotificationHistory(url: url)
+    let first = history.append(title: "ошибка", body: "worker exit 1")
+    history.append(title: "готово", body: "Обработано файлов: 1")
+
+    history.markRead(id: first.id)
+    eq(history.unreadCount, 1, "остаётся одно непрочитанное")
+
+    let reopened = NotificationHistory(url: url)
+    eq(reopened.records.count, 2, "записи прочитались с диска")
+    eq(reopened.unreadCount, 1, "признак прочтения сохранён")
+    eq(reopened.records.first?.title, "готово", "порядок сохранён")
+    eq(reopened.records.last?.body, "worker exit 1", "текст сохранён целиком")
+}
+
+test("NotificationHistory: лимит отбрасывает самые старые") {
+    let url = try makeJournalURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let history = NotificationHistory(url: url, limit: 3)
+    for i in 1...5 { history.append(title: "n\(i)", body: "") }
+    eq(history.records.map(\.title), ["n5", "n4", "n3"], "остаются три последних")
+    eq(NotificationHistory(url: url).records.count, 3, "на диске тоже три")
+}
+
+test("NotificationHistory: пометить всё прочитанным и очистить") {
+    let url = try makeJournalURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let history = NotificationHistory(url: url)
+    history.append(title: "a", body: "")
+    history.append(title: "b", body: "")
+
+    history.markAllRead()
+    eq(history.unreadCount, 0, "непрочитанных не осталось")
+    eq(NotificationHistory(url: url).unreadCount, 0, "сохранилось")
+
+    history.clear()
+    eq(history.records.count, 0, "журнал пуст")
+    eq(NotificationHistory(url: url).records.count, 0, "и на диске пуст")
+}
+
+test("NotificationHistory: битый файл не мешает вести журнал дальше") {
+    let url = try makeJournalURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("не json".utf8).write(to: url)
+
+    let history = NotificationHistory(url: url)
+    eq(history.records.count, 0, "битое содержимое отброшено")
+    history.append(title: "после", body: "")
+    eq(NotificationHistory(url: url).records.first?.title, "после", "запись поверх битого файла")
+}
+
+// MARK: - Подметание недокачанных кусков
+
+test("PhoneSyncStaging: брошенный кусок удаляется, свежий остаётся") {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+    let old = directory.appendingPathComponent("abandoned.part")
+    let fresh = directory.appendingPathComponent("resuming.part")
+    let alien = directory.appendingPathComponent("readme.txt")
+    for url in [old, fresh, alien] { try Data("x".utf8).write(to: url) }
+    let longAgo = Date().addingTimeInterval(-PhoneSyncStaging.defaultMaxAge - 60)
+    try FileManager.default.setAttributes([.modificationDate: longAgo], ofItemAtPath: old.path)
+
+    let removed = PhoneSyncStaging.sweep(directory: directory)
+    eq(removed.map(\.lastPathComponent), ["abandoned.part"], "удалён только брошенный кусок")
+    check(!FileManager.default.fileExists(atPath: old.path), "старого куска нет")
+    check(FileManager.default.fileExists(atPath: fresh.path), "докачиваемый кусок цел")
+    check(FileManager.default.fileExists(atPath: alien.path), "чужие файлы не трогаем")
+}
+
+test("PhoneSyncStaging: несуществующая папка не роняет подметание") {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    eq(PhoneSyncStaging.sweep(directory: directory).count, 0, "удалять нечего")
+}
+
+
 print("\n==== Swift tests: \(passed) passed, \(failed) failed ====")
 exit(failed == 0 ? 0 : 1)
