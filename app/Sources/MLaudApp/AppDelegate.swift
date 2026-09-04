@@ -16,6 +16,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: SettingsWindowController?
     private var pairingWindow: PairingWindowController?
     private var notificationsWindow: NotificationsWindowController?
+    private var voicesWindow: VoicesWindowController?
+    /// Сайдкары записей для разметки голосов. Счётчик «к разметке» кешируется:
+    /// refresh() дёргается на каждое уведомление, а сканировать каталог каждый раз незачем.
+    private lazy var speakers = SpeakerSidecarStore(
+        root: serviceDirectory.appendingPathComponent("speakers"))
+    private var pendingVoices = 0
     /// Журнал уведомлений: баннер исчезает через несколько секунд, прочитать
     /// написанное нужно и позже.
     private lazy var notifications = NotificationHistory(
@@ -116,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restartWatcher()
         restartDictation()
         restartPhoneSync()
+        refreshPendingVoices()
         refresh()
         autoProcess()  // подхватить файлы, накопившиеся пока приложение не работало
     }
@@ -181,6 +188,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : "Уведомления…"
         menu.addItem(NSMenuItem(title: notificationsTitle,
                                 action: #selector(openNotifications), keyEquivalent: ""))
+
+        if settings.identifyEnabled {
+            let title = pendingVoices > 0
+                ? "Голоса… (\(pendingVoices) к разметке)"
+                : "Голоса…"
+            menu.addItem(NSMenuItem(title: title, action: #selector(openVoices), keyEquivalent: ""))
+        }
 
         if settings.dictationEnabled {
             menu.addItem(.separator())
@@ -265,6 +279,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func settingsSaved() {
+        refreshPendingVoices()
+        refresh()
+    }
+
     @objc private func openSettings() {
         if settingsWindow == nil {
             settingsWindow = SettingsWindowController(
@@ -274,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.restartWatcher()    // применить изменения мгновенной обработки
                 self?.restartDictation()  // ... и включение/выключение диктовки
                 self?.restartPhoneSync()  // ... и приёма с телефона
-                self?.refresh()
+                self?.settingsSaved()     // ... и пункт «Голоса…» со счётчиком
             }
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -370,6 +389,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async {
                 self.isProcessing = false
+                self.refreshPendingVoices()
+                self.voicesWindow?.reload()
                 if flushOnly {
                     // Тихий досыл очереди: без уведомления «Готово: 0» и без дебаунс-
                     // ретригера — независимо от кода возврата. Ретригер здесь и был
@@ -390,7 +411,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func notifyResult(_ result: ProcessingStatus, count: Int) {
         switch result {
         case .done:
-            notify(title: "MLaud — готово", body: "Обработано файлов: \(count)")
+            var body = "Обработано файлов: \(count)"
+            var action: String?
+            if settings.identifyEnabled, pendingVoices > 0 {
+                let word = VoicesWindowController.plural(pendingVoices, "голос", "голоса", "голосов")
+                body += " · к разметке: \(pendingVoices) \(word)"
+                action = "voices"
+            }
+            notify(title: "MLaud — готово", body: body, action: action)
         case .error(let message):
             notify(title: "MLaud — ошибка", body: message)
         default:
@@ -406,10 +434,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// уведомления» управляет баннером, а не тем, помнит ли приложение, о чём
     /// сообщало. Диспетчеризация на главный поток здесь, а не у вызывающих:
     /// об ошибках сообщают и фоновые обработчики.
-    private func notify(title: String, body: String) {
+    private func notify(title: String, body: String, action: String? = nil) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let record = self.notifications.append(title: title, body: body)
+            let record = self.notifications.append(title: title, body: body, action: action)
             if self.settings.notificationsEnabled {
                 UserNotifier.notify(title: title, body: body,
                                     identifier: record.id.uuidString)
@@ -432,6 +460,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notificationsWindow?.showWindow(nil)
         notificationsWindow?.window?.makeKeyAndOrderFront(nil)
         notificationsWindow?.reload(revealing: id)
+        refresh()
+    }
+
+    // MARK: - Голоса
+
+    private func refreshPendingVoices() {
+        pendingVoices = settings.identifyEnabled ? speakers.pendingCount() : 0
+    }
+
+    @objc private func openVoices() { showVoices() }
+
+    private func showVoices() {
+        if voicesWindow == nil {
+            let runner = VoicesRunner(
+                makeCommand: { [unowned self] args in
+                    WorkerCommand(
+                        pythonExecutable: self.pythonExecutable,
+                        workerDirectory: self.workerDirectory,
+                        inboxFolder: self.folderStore.inboxFolder ?? self.serviceDirectory,
+                        additionalPythonPath: self.additionalPythonPath,
+                        extraEnvironment: self.settings.workerEnvironment(),
+                        module: "mlaud_worker.voices",
+                        moduleArguments: args
+                    )
+                },
+                log: { [weak self] line in
+                    guard let self, let handle = self.openWorkerLog() else { return }
+                    defer { try? handle.close() }
+                    if let data = (line + "\n").data(using: .utf8) { handle.write(data) }
+                }
+            )
+            voicesWindow = VoicesWindowController(store: speakers, runner: runner) { [weak self] in
+                self?.refreshPendingVoices()
+                self?.refresh()
+            }
+            voicesWindow?.window?.center()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        voicesWindow?.showWindow(nil)
+        voicesWindow?.window?.makeKeyAndOrderFront(nil)
+        voicesWindow?.reload()
+        refreshPendingVoices()
         refresh()
     }
 
@@ -610,8 +680,14 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         let isDefaultAction = response.actionIdentifier == UNNotificationDefaultActionIdentifier
         let id = UUID(uuidString: response.notification.request.identifier)
         DispatchQueue.main.async { [weak self] in
-            guard isDefaultAction else { return }
-            self?.showNotifications(revealing: id)
+            guard let self, isDefaultAction else { return }
+            // «Готово · к разметке: 2 голоса» ведёт сразу в «Голоса», остальное — в журнал.
+            if let id, self.notifications.record(id: id)?.action == "voices" {
+                self.notifications.markRead(id: id)
+                self.showVoices()
+            } else {
+                self.showNotifications(revealing: id)
+            }
         }
         completionHandler()
     }

@@ -11,8 +11,10 @@ public struct WorkerCommand {
     public var additionalPythonPath: [URL]
     public var extraEnvironment: [String: String]
     /// Запускаемый модуль. Пакетная обработка — `mlaud_worker`, диктовка —
-    /// `mlaud_worker.dictate` (резидентный процесс с загруженной моделью).
+    /// `mlaud_worker.dictate` (резидентный процесс с загруженной моделью),
+    /// база голосов — `mlaud_worker.voices` с подкомандой в `moduleArguments`.
     public var module: String
+    public var moduleArguments: [String]
 
     public init(
         pythonExecutable: URL,
@@ -20,7 +22,8 @@ public struct WorkerCommand {
         inboxFolder: URL,
         additionalPythonPath: [URL] = [],
         extraEnvironment: [String: String] = [:],
-        module: String = "mlaud_worker"
+        module: String = "mlaud_worker",
+        moduleArguments: [String] = []
     ) {
         self.pythonExecutable = pythonExecutable
         self.workerDirectory = workerDirectory
@@ -28,10 +31,11 @@ public struct WorkerCommand {
         self.additionalPythonPath = additionalPythonPath
         self.extraEnvironment = extraEnvironment
         self.module = module
+        self.moduleArguments = moduleArguments
     }
 
     public func arguments() -> [String] {
-        ["-m", module]
+        ["-m", module] + moduleArguments
     }
 
     /// Каталог для кешей, которые Python и numba иначе пишут рядом с исходниками.

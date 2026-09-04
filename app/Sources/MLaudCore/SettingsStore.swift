@@ -17,6 +17,29 @@ public final class SettingsStore {
         public static let phoneSync = "phoneSyncEnabled"
         public static let dictationKeyCode = "dictationKeyCode"
         public static let dictationModifiers = "dictationModifiers"
+        public static let identify = "identifyEnabled"
+        public static let identifyPreset = "identifyPreset"
+    }
+
+    /// Порог узнавания голоса: три пресета из замера (ADR-016), а не сырое число.
+    public enum IdentifyPreset: String, CaseIterable {
+        case strict, balanced, soft
+
+        public var threshold: Double {
+            switch self {
+            case .strict: return 0.80
+            case .balanced: return 0.75
+            case .soft: return 0.70
+            }
+        }
+
+        public var title: String {
+            switch self {
+            case .strict: return "строго (0.80) — ни одного чужого имени"
+            case .balanced: return "баланс (0.75)"
+            case .soft: return "мягко (0.70) — больше имён, изредка чужое"
+            }
+        }
     }
 
     public static let defaultModel = "rnnt"
@@ -111,6 +134,18 @@ public final class SettingsStore {
         }
     }
 
+    /// Подписывать известные голоса именами (Фаза 3). Опция поверх диаризации,
+    /// по умолчанию выключена.
+    public var identifyEnabled: Bool {
+        get { defaults.bool(forKey: Key.identify) }
+        set { defaults.set(newValue, forKey: Key.identify) }
+    }
+
+    public var identifyPreset: IdentifyPreset {
+        get { IdentifyPreset(rawValue: defaults.string(forKey: Key.identifyPreset) ?? "") ?? .balanced }
+        set { defaults.set(newValue.rawValue, forKey: Key.identifyPreset) }
+    }
+
     /// Устройство для диаризации: 'mps' (быстро, Apple Silicon) или 'cpu'.
     public var diarizeDevice: String {
         get {
@@ -132,6 +167,11 @@ public final class SettingsStore {
         if diarizeEnabled {
             env["MLAUD_DIARIZE"] = "1"
             env["MLAUD_DIARIZE_DEVICE"] = diarizeDevice
+            // Идентификация без диаризации невозможна: без неё нет кластеров.
+            if identifyEnabled {
+                env["MLAUD_IDENTIFY"] = "1"
+                env["MLAUD_IDENTIFY_THRESHOLD"] = String(format: "%.2f", identifyPreset.threshold)
+            }
         }
         let hf = hfToken.trimmingCharacters(in: .whitespacesAndNewlines)
         if !hf.isEmpty { env["MLAUD_HF_TOKEN"] = hf }

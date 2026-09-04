@@ -653,5 +653,150 @@ test("PhoneSyncStaging: несуществующая папка не роняе�
 }
 
 
+// MARK: - Голос-ID: команда, настройки, сайдкар
+
+test("WorkerCommand: аргументы подкоманды voices идут после -m") {
+    let cmd = WorkerCommand(
+        pythonExecutable: URL(fileURLWithPath: "/usr/bin/python3"),
+        workerDirectory: URL(fileURLWithPath: "/w"),
+        inboxFolder: URL(fileURLWithPath: "/in"),
+        module: "mlaud_worker.voices",
+        moduleArguments: ["assign", "/s/speakers.json", "SPEAKER_01", "--name", "Милана Г"])
+    eq(cmd.arguments(), ["-m", "mlaud_worker.voices", "assign", "/s/speakers.json", "SPEAKER_01", "--name", "Милана Г"], "порядок аргументов")
+    let plain = WorkerCommand(pythonExecutable: URL(fileURLWithPath: "/p"),
+                              workerDirectory: URL(fileURLWithPath: "/w"),
+                              inboxFolder: URL(fileURLWithPath: "/in"))
+    eq(plain.arguments(), ["-m", "mlaud_worker"], "без подкоманды — как раньше")
+}
+
+test("SettingsStore: идентификация только поверх диаризации") {
+    let s = SettingsStore(defaults: makeDefaults())
+    check(!s.identifyEnabled, "по умолчанию выключена")
+    eq(s.identifyPreset, .balanced, "пресет по умолчанию — баланс")
+    check(s.workerEnvironment()["MLAUD_IDENTIFY"] == nil, "выключено — env нет")
+
+    s.identifyEnabled = true
+    check(s.workerEnvironment()["MLAUD_IDENTIFY"] == nil, "без диаризации env нет")
+    s.diarizeEnabled = true
+    eq(s.workerEnvironment()["MLAUD_IDENTIFY"], "1", "с диаризацией — включено")
+    eq(s.workerEnvironment()["MLAUD_IDENTIFY_THRESHOLD"], "0.75", "порог пресета")
+    s.identifyPreset = .strict
+    eq(s.workerEnvironment()["MLAUD_IDENTIFY_THRESHOLD"], "0.80", "строгий пресет")
+    eq(SettingsStore(defaults: makeDefaults()).identifyPreset, .balanced, "мусор в defaults → баланс")
+}
+
+test("NotificationHistory: поле action переживает перезапись и отсутствует в старых записях") {
+    let url = try makeJournalURL()
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let old = """
+    [{"id":"D2A5E0D0-5D2C-4C1E-9C3B-000000000001","title":"старая","body":"без поля",
+      "date":"2026-09-01T10:00:00Z","isRead":false}]
+    """
+    try Data(old.utf8).write(to: url)
+    let history = NotificationHistory(url: url)
+    eq(history.records.count, 1, "старая запись прочитана")
+    check(history.records[0].action == nil, "у старой записи action nil")
+    let rec = history.append(title: "готово", body: "к разметке: 2", action: "voices")
+    eq(NotificationHistory(url: url).record(id: rec.id)?.action, "voices", "action сохранён")
+    check(history.record(id: UUID()) == nil, "неизвестный id → nil")
+}
+
+let sidecarJSON = """
+{"version": 1, "source": "rec.m4a", "base": "rec", "period": "2026-09",
+ "processed_at": "2026-09-03T19:20:11+00:00", "txt": "/out/rec.txt", "srt": "/out/rec.srt",
+ "duration_sec": 1284.3, "threshold": 0.75, "min_speech": 30.0,
+ "clusters": [
+  {"label": "SPEAKER_01", "display": "Спикер 1", "speech_sec": 389.2, "first_at": 0.0, "n_turns": 88,
+   "quote": "смотрите", "clips": ["clips/SPEAKER_01_0.wav", "clips/SPEAKER_01_1.wav"],
+   "clip_starts": [106.3, 379.8],
+   "embedding": [0.1, 0.2, 0.3], "match": {"name": "я", "score": 0.829, "sure": true},
+   "written": "я", "assigned": null, "dismissed": false, "mixed": false, "rejected": []},
+  {"label": "SPEAKER_00", "display": "Спикер 2", "speech_sec": 367.0, "first_at": 0.5, "n_turns": 40,
+   "quote": "", "clips": [], "embedding": [0.1], "match": {"name": "Дина П", "score": 0.77, "sure": false},
+   "written": "Дина П(?)", "assigned": null, "dismissed": false, "rejected": []},
+  {"label": "SPEAKER_02", "display": "Спикер 3", "speech_sec": 12.0, "first_at": 7.0, "n_turns": 3,
+   "quote": "угу", "clips": [], "embedding": [0.1], "match": null,
+   "written": "Спикер 3", "assigned": null, "dismissed": false, "rejected": []},
+  {"label": "SPEAKER_03", "display": "Спикер 4", "speech_sec": 60.0, "first_at": 9.0, "n_turns": 3,
+   "quote": "", "clips": [], "embedding": null, "match": null,
+   "written": "Спикер 4", "assigned": null, "dismissed": false, "rejected": []}
+ ]}
+"""
+
+test("SpeakerSidecar: разбор и смысл полей совпадают с speakers.py") {
+    let s = try JSONDecoder().decode(SpeakerSidecar.self, from: Data(sidecarJSON.utf8))
+    eq(s.base, "rec", "base")
+    eq(s.clusters.count, 4, "кластеры")
+    check(s.processedAt != nil, "processed_at разобран")
+    let me = s.clusters[0], unsure = s.clusters[1], short = s.clusters[2], padded = s.clusters[3]
+    check(me.hasEmbedding && !padded.hasEmbedding, "embedding: есть / null")
+    eq(me.currentName, "я", "уверенный — имя как есть")
+    eq(unsure.currentName, "Дина П(?)", "неуверенный — с пометкой")
+    eq(short.currentName, "Спикер 3", "без узнавания — номер")
+    check(!me.needsAttention(minSpeech: s.minSpeech), "уверенный не ждёт разметки")
+    check(unsure.needsAttention(minSpeech: s.minSpeech), "неуверенный ждёт")
+    check(!short.needsAttention(minSpeech: s.minSpeech), "короткий не ждёт")
+    check(!padded.needsAttention(minSpeech: s.minSpeech), "без вектора не ждёт")
+    eq(s.pendingCount, 1, "к разметке — один")
+    eq(me.clips.count, 2, "клипы")
+    eq(me.clipStarts, [106.3, 379.8], "таймкоды клипов")
+    check(unsure.clipStarts.isEmpty && !unsure.mixed, "старый формат без clip_starts/mixed читается")
+
+    let mixed = SpeakerCluster(label: "S", display: "Спикер 7", speechSec: 200,
+                               match: SpeakerMatch(name: "я", score: 0.9, sure: true), dismissed: true, mixed: true)
+    eq(mixed.currentName, "Спикер 7 (смесь голосов)", "смесь — с пометкой в транскрипте, без имени")
+    check(!mixed.needsAttention(minSpeech: 30) && mixed.isCollapsed, "смесь свёрнута и не ждёт")
+    let hidden = SpeakerCluster(label: "S", display: "Спикер 8", speechSec: 200, hidden: true)
+    check(!hidden.needsAttention(minSpeech: 30) && hidden.isCollapsed && hidden.hidden, "убранный корзиной не ждёт")
+    check(!s.clusters[0].hidden, "старый формат без hidden читается")
+
+    let rejected = SpeakerCluster(label: "S", display: "Спикер 9", speechSec: 60,
+                                  match: SpeakerMatch(name: "я", score: 0.9, sure: true), rejected: ["я"])
+    eq(rejected.currentName, "Спикер 9", "«Нет» снимает имя")
+    check(rejected.needsAttention(minSpeech: 30), "и возвращает в разметку")
+    let assigned = SpeakerCluster(label: "S", display: "Спикер 9", speechSec: 60, assigned: "Кира Л", dismissed: true)
+    eq(assigned.currentName, "Кира Л", "assigned важнее dismissed")
+    let dismissed = SpeakerCluster(label: "S", display: "Спикер 9", speechSec: 60,
+                                   match: SpeakerMatch(name: "я", score: 0.7, sure: false), dismissed: true)
+    eq(dismissed.currentName, "Спикер 9", "dismissed — без имени и без (?)")
+    check(!dismissed.needsAttention(minSpeech: 30), "dismissed не ждёт")
+}
+
+test("SpeakerSidecarStore: новые сверху, битые пропускаются, счётчик суммируется") {
+    let root = try makeTempDir()
+    func put(_ period: String, _ base: String, _ json: String, at: String) throws {
+        let dir = root.appendingPathComponent(period).appendingPathComponent(base)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(json.replacingOccurrences(of: "2026-09-03T19:20:11+00:00", with: at).utf8)
+            .write(to: dir.appendingPathComponent(SpeakerSidecarStore.fileName))
+    }
+    try put("2026-08", "older", sidecarJSON, at: "2026-08-28T14:11:34+00:00")
+    try put("2026-09", "newer", sidecarJSON, at: "2026-09-03T16:03:08+00:00")
+    try put("2026-09", "broken", "{не json", at: "")
+    let store = SpeakerSidecarStore(root: root)
+    let recent = store.recent()
+    eq(recent.map { $0.sidecar.base }, ["rec", "rec"], "две записи, битая пропущена")
+    eq(recent.map { $0.url.deletingLastPathComponent().lastPathComponent }, ["newer", "older"], "новые сверху")
+    eq(store.pendingCount(), 2, "по одному с записи")
+    eq(recent[0].clipURLs(for: recent[0].sidecar.clusters[0]).map(\.lastPathComponent),
+       ["SPEAKER_01_0.wav", "SPEAKER_01_1.wav"], "клипы рядом с сайдкаром")
+    eq(SpeakerSidecarStore(root: root.appendingPathComponent("nope")).pendingCount(), 0, "нет каталога — ноль")
+}
+
+test("VoiceListing: разбор вывода list --json") {
+    let json = """
+    {"root": "/Users/x/ASR/voices", "people": [
+      {"name": "Милана Г", "created": "2026-09-03T10:00:00+00:00",
+       "samples": [{"id": "abc", "person": "Милана Г", "source_file": "rec.m4a", "label": "SPEAKER_01",
+                    "speech_sec": 130.0, "channel": "phone", "added": "2026-09-03T10:00:00+00:00"}]},
+      {"name": "я", "created": "2026-09-01T10:00:00+00:00", "samples": []}]}
+    """
+    let listing = try VoiceListing.parse(Data(json.utf8))
+    eq(listing.names, ["Милана Г", "я"], "имена по порядку")
+    eq(listing.people[0].samples[0].channel, "phone", "канал образца")
+    eq(listing.people[0].samples[0].speechSec, 130.0, "речь образца")
+}
+
 print("\n==== Swift tests: \(passed) passed, \(failed) failed ====")
 exit(failed == 0 ? 0 : 1)

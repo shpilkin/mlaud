@@ -23,6 +23,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let hfField = NSTextField()
     private let speakersField = NSTextField()
     private let devicePopup = NSPopUpButton()
+    private let identifyCheck = NSButton(checkboxWithTitle: "Подписывать известные голоса", target: nil, action: nil)
+    private let presetPopup = NSPopUpButton()
 
     init(
         settings: SettingsStore,
@@ -64,6 +66,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         speakersField.placeholderString = "0 = авто"
         modelPopup.addItems(withTitles: SettingsStore.availableModels)
         devicePopup.addItems(withTitles: SettingsStore.availableDevices)
+        for preset in SettingsStore.IdentifyPreset.allCases {
+            presetPopup.addItem(withTitle: preset.title)
+        }
+        // Без диаризации нет кластеров, значит и подписывать нечего.
+        diarizeCheck.target = self
+        diarizeCheck.action = #selector(diarizeToggled)
 
         func label(_ text: String) -> NSTextField {
             let l = NSTextField(labelWithString: text)
@@ -94,6 +102,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [label("HF-токен:"), hfField, hint("для скачивания весов pyannote с huggingface.co; нужен один раз")],
             [label("Число спикеров:"), speakersField, hint("0 = определить авто; N — если точно знаешь сколько говорящих")],
             [label("Устройство диаризации:"), devicePopup, hint("mps — GPU Apple, ~22× быстрее; cpu — запасной")],
+            [NSGridCell.emptyContentView, identifyCheck, hint("имя вместо «Спикер N», если голос есть в базе; размечать — в меню «Голоса…»")],
+            [label("Порог узнавания:"), presetPopup, hint("строго — 0 чужих имён на замере; мягко — на четверть больше имён, но изредка чужое")],
             [NSGridCell.emptyContentView, phoneSyncCheck, hint("прямой приём по локальной сети — замена транзиту через iCloud")],
             [NSGridCell.emptyContentView, pairingButton, hint("QR-код: отсканировать один раз в MLaud на телефоне")],
         ])
@@ -141,6 +151,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         speakersField.stringValue = settings.numSpeakers > 0 ? String(settings.numSpeakers) : ""
         devicePopup.selectItem(withTitle: settings.diarizeDevice)
         phoneSyncCheck.state = settings.phoneSyncEnabled ? .on : .off
+        identifyCheck.state = settings.identifyEnabled ? .on : .off
+        presetPopup.selectItem(at: SettingsStore.IdentifyPreset.allCases
+            .firstIndex(of: settings.identifyPreset) ?? 1)
+        diarizeToggled()
+    }
+
+    @objc private func diarizeToggled() {
+        let on = diarizeCheck.state == .on
+        identifyCheck.isEnabled = on
+        presetPopup.isEnabled = on
     }
 
     @objc private func showPairingCode() {
@@ -160,6 +180,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         settings.numSpeakers = Int(speakersField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         settings.diarizeDevice = devicePopup.titleOfSelectedItem ?? SettingsStore.defaultDevice
         settings.phoneSyncEnabled = phoneSyncCheck.state == .on
+        settings.identifyEnabled = identifyCheck.state == .on
+        let presets = SettingsStore.IdentifyPreset.allCases
+        settings.identifyPreset = presets[min(max(0, presetPopup.indexOfSelectedItem), presets.count - 1)]
 
         if settings.diarizeEnabled && settings.hfToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let alert = NSAlert()

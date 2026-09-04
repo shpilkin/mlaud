@@ -21,6 +21,12 @@ class Config:
     hf_token: str = ""
     diarize_device: str = "mps"   # 'mps' на Apple Silicon ~22x быстрее CPU; 'cpu' как запасной
     num_speakers: int = 0         # 0 = автоопределение
+    # Голос-ID (Фаза 3) — опция поверх диаризации: без diarize не включается.
+    # Пороги и фильтр измерены, а не назначены (ADR-016).
+    identify: bool = False
+    voices_dir: Path = field(default_factory=lambda: Path.home() / "ASR/voices")  # не iCloud: биометрия
+    identify_threshold: float = 0.75    # пресеты: строго 0.80 / баланс 0.75 / мягко 0.70
+    identify_min_speech: float = 30.0   # c речи в кластере; короче — имени нет никогда (FR-8.9)
     # Папка обмена роутера (Niti). None = сдача артефактов выключена, конвейер работает
     # ровно как раньше. Путь задаётся снаружи: у роутера каталог данных переопределяется
     # переменной окружения, поэтому хардкодить его нельзя.
@@ -32,6 +38,7 @@ class Config:
         self.processed = Path(self.processed)
         self.failed = Path(self.failed)
         self.service = Path(self.service)
+        self.voices_dir = Path(self.voices_dir)
         if self.router_inbox is not None:
             self.router_inbox = Path(self.router_inbox)
 

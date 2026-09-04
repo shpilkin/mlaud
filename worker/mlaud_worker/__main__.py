@@ -31,6 +31,17 @@ def load_dotenv() -> None:
             os.environ[key] = val
 
 
+def _flag(key: str) -> bool:
+    return os.environ.get(key, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _float_env(key: str, default: float) -> float:
+    try:
+        return float(os.environ[key])
+    except (KeyError, ValueError):
+        return default
+
+
 def build_config() -> Config:
     cfg = Config.default()
     if os.environ.get("MLAUD_INBOX"):
@@ -60,6 +71,13 @@ def build_config() -> Config:
             cfg.num_speakers = int(os.environ["MLAUD_NUM_SPEAKERS"])
         except ValueError:
             cfg.num_speakers = 0
+    # Голос-ID поверх диаризации (Фаза 3).
+    if os.environ.get("MLAUD_IDENTIFY"):
+        cfg.identify = _flag("MLAUD_IDENTIFY")
+    if os.environ.get("MLAUD_VOICES_DIR"):
+        cfg.voices_dir = os.environ["MLAUD_VOICES_DIR"]
+    cfg.identify_threshold = _float_env("MLAUD_IDENTIFY_THRESHOLD", cfg.identify_threshold)
+    cfg.identify_min_speech = _float_env("MLAUD_IDENTIFY_MIN_SPEECH", cfg.identify_min_speech)
     cfg.__post_init__()
     return cfg
 
@@ -83,8 +101,14 @@ def main() -> int:
         print(f"RESEND {base}: недоставленный ранее транскрипт отправлен")
     for r in result["processed"]:
         delivery = r.get("delivery", "?")
+        speakers = r.get("speakers") or {}
+        tail = ""
+        if speakers.get("status") == "written":
+            tail = f" [к разметке: {speakers.get('pending', 0)}]"
+        elif speakers.get("status"):
+            tail = f" [сайдкар голосов: {speakers['status']}]"
         print(f"OK   {r['source']} -> {r['txt']} ({r['segments']} segments) "
-              f"[доставка: {delivery}]")
+              f"[доставка: {delivery}]{tail}")
         # Провал доставки раньше был невидим: _deliver ловит ошибку сам, а OK
         # печатался всегда. Теперь дублируем в stderr, чтобы строка попала в
         # хвост лога и в текст ошибки в меню приложения.
@@ -94,6 +118,9 @@ def main() -> int:
                   file=sys.stderr)
     for e in result["errors"]:
         print(f"FAIL {e['source']}: {e['error']}", file=sys.stderr)
+    if result.get("identify_error"):
+        print(f"WARN база голосов не прочитана, имена не подставлены — "
+              f"{result['identify_error']}", file=sys.stderr)
     # Исчерпавшие лимит попыток: больше не досылаются, транскрипт остаётся на диске.
     given_up = result.get("given_up", [])
     for g in given_up:

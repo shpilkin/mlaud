@@ -322,3 +322,109 @@ def test_no_router_installed_means_no_stray_inbox(tmp_path):
     )
     assert result["processed"][0]["artifact"] == "no-router"
     assert not (tmp_path / "EmailReader").exists()
+
+
+# --- диаризация + имена (Фаза 3) ---
+
+import numpy as np
+
+from mlaud_worker.voices import VoiceStore
+
+
+def _vec(i, dim=8, scale=2.5):
+    v = np.zeros(dim, dtype=np.float32)
+    v[i] = scale
+    return v
+
+
+class FakeWordTranscriber(FakeTranscriber):
+    def __init__(self, words):
+        super().__init__([])
+        self._words = words
+
+    def transcribe_words(self, path):
+        return list(self._words)
+
+
+class FakeDiarizer:
+    def __init__(self, turns, centroids):
+        self.turns, self.centroids = turns, centroids
+
+    def diarize(self, path, num_speakers=None):
+        return list(self.turns), dict(self.centroids)
+
+
+TURNS = [
+    {"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"},    # 40 c → достаточно для имени
+    {"start": 40.5, "end": 45.5, "speaker": "SPEAKER_01"},   # 5 c → имени не будет никогда
+]
+WORDS = [
+    {"start": 0.0, "end": 0.5, "text": "привет"},
+    {"start": 0.5, "end": 1.0, "text": "всем"},
+    {"start": 41.0, "end": 41.5, "text": "угу"},
+]
+CENTROIDS = {"SPEAKER_00": _vec(0), "SPEAKER_01": _vec(1)}
+
+
+def _run_diarized(tmp_path, identify: bool, enroll: bool = True):
+    cfg = make_cfg(tmp_path)
+    cfg.identify = identify
+    cfg.voices_dir = tmp_path / "voices"
+    cfg.inbox.mkdir(parents=True)
+    if enroll:
+        # в базе и «Милана Г» (= SPEAKER_00), и голос короткого кластера — он всё равно
+        # не должен получить имени
+        store = VoiceStore(cfg.voices_dir)
+        store.add("Милана Г", _vec(0), source_file="old.m4a", label="SPEAKER_02", speech_sec=200)
+        store.add("Гость", _vec(1), source_file="old.m4a", label="SPEAKER_03", speech_sec=60)
+    (cfg.inbox / "2026-06-21_rec.m4a").write_bytes(b"x")
+    result = process_inbox(cfg, transcriber=FakeWordTranscriber(WORDS),
+                           diarizer=FakeDiarizer(TURNS, CENTROIDS), use_lock=False)
+    assert result["errors"] == []
+    r = result["processed"][0]
+    return r["txt"].read_text("utf-8"), r["srt"].read_text("utf-8"), r
+
+
+def test_identify_puts_name_into_txt_and_srt(tmp_path):
+    txt, srt, r = _run_diarized(tmp_path, identify=True)
+    assert txt == "[00:00:00] Милана Г: привет всем\n[00:00:41] Спикер 2: угу\n"
+    assert "Милана Г: привет всем" in srt and "Спикер 2: угу" in srt
+    # сайдкар для окна «Голоса»: узнан уверенно → к разметке нечего
+    assert r["speakers"]["status"] == "written" and r["speakers"]["pending"] == 0
+    from mlaud_worker import speakers as spk
+    sidecar = spk.load(Path(r["speakers"]["path"]))
+    assert sidecar["source"] == "2026-06-21_rec.m4a" and sidecar["txt"] == str(r["txt"])
+    assert sidecar["clusters"][0]["match"]["name"] == "Милана Г"
+    assert sidecar["clusters"][0]["written"] == "Милана Г"
+    assert "clips_error" in sidecar                       # аудио-заглушка не декодируется
+
+
+def test_identify_off_gives_previous_output_even_with_voices_on_disk(tmp_path):
+    txt, srt, r = _run_diarized(tmp_path, identify=False)
+    assert txt == "[00:00:00] Спикер 1: привет всем\n[00:00:41] Спикер 2: угу\n"
+    assert "Спикер 1: привет всем" in srt
+    assert r["speakers"] is None                          # без идентификации сайдкара нет
+
+
+def test_identify_broken_voices_index_degrades_to_speaker_n(tmp_path):
+    """Испорченный index.json: транскрипт делается без имён, прогон не падает."""
+    cfg = make_cfg(tmp_path)
+    cfg.identify = True
+    cfg.voices_dir = tmp_path / "voices"
+    cfg.voices_dir.mkdir()
+    (cfg.voices_dir / "index.json").write_text("{не json", encoding="utf-8")
+    cfg.inbox.mkdir(parents=True)
+    (cfg.inbox / "2026-06-21_rec.m4a").write_bytes(b"x")
+    result = process_inbox(cfg, transcriber=FakeWordTranscriber(WORDS),
+                           diarizer=FakeDiarizer(TURNS, CENTROIDS), use_lock=False)
+    assert result["errors"] == []
+    assert result["identify_error"]
+    txt = result["processed"][0]["txt"].read_text("utf-8")
+    assert txt.startswith("[00:00:00] Спикер 1: привет всем")
+
+
+def test_identify_with_empty_voices_dir_is_previous_output(tmp_path):
+    txt, _, r = _run_diarized(tmp_path, identify=True, enroll=False)
+    assert txt == "[00:00:00] Спикер 1: привет всем\n[00:00:41] Спикер 2: угу\n"
+    # пустая база: сайдкар всё равно пишется — иначе первый голос завести неоткуда
+    assert r["speakers"]["status"] == "written" and r["speakers"]["pending"] == 1

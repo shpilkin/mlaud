@@ -7,14 +7,18 @@ public struct AppNotification: Codable, Equatable, Sendable {
     public let body: String
     public let date: Date
     public var isRead: Bool
+    /// Куда ведёт клик по баннеру: `nil` — в журнал, `"voices"` — в окно «Голоса».
+    /// Старые записи без поля читаются как `nil`.
+    public let action: String?
 
     public init(id: UUID = UUID(), title: String, body: String,
-                date: Date = Date(), isRead: Bool = false) {
+                date: Date = Date(), isRead: Bool = false, action: String? = nil) {
         self.id = id
         self.title = title
         self.body = body
         self.date = date
         self.isRead = isRead
+        self.action = action
     }
 }
 
@@ -50,13 +54,19 @@ public final class NotificationHistory {
     }
 
     @discardableResult
-    public func append(title: String, body: String, date: Date = Date()) -> AppNotification {
-        let record = AppNotification(title: title, body: body, date: date)
+    public func append(title: String, body: String, date: Date = Date(),
+                       action: String? = nil) -> AppNotification {
+        let record = AppNotification(title: title, body: body, date: date, action: action)
         mutate { list in
             list.insert(record, at: 0)
             if list.count > self.limit { list.removeLast(list.count - self.limit) }
         }
         return record
+    }
+
+    public func record(id: UUID) -> AppNotification? {
+        lock.lock(); defer { lock.unlock() }
+        return storage.first { $0.id == id }
     }
 
     public func markRead(id: UUID) {

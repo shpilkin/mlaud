@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -113,23 +114,57 @@ def _deliver(notifier, txt_path: Path, base: str) -> str:
         return f"failed: {msg}"
 
 
+@dataclass
+class Analysis:
+    """Разобранная запись: реплики и, при диаризации, кластеры с их подписями."""
+    segments: list
+    turns: list = field(default_factory=list)
+    centroids: dict = field(default_factory=dict)
+    names: dict = field(default_factory=dict)
+    idents: dict = field(default_factory=dict)
+
+
+def analyze(path: Path, cfg: Config, transcriber: Transcriber,
+            diarizer=None, gallery=None) -> Analysis:
+    """Транскрипция (→ диаризация → имена) без записи на диск.
+
+    Общее ядро конвейера и «разметить старую запись» (voices.py prepare): второй путь
+    делает то же самое, только без доставки и архивации.
+    `gallery` — {имя: центроид} из базы голосов; None/пусто — «Спикер N» везде.
+    """
+    if diarizer is None:
+        return Analysis(segments=transcriber.transcribe(str(path)))
+    # Точная диаризация: слова с тайм-кодами → разметка по спикерам → склейка в реплики.
+    # Имена подставляются на уровне подписей кластеров, вывод про них не знает.
+    from .diarize import group_words_by_speaker, identify_speakers, name_speakers
+    num = cfg.num_speakers or None
+    turns, centroids = diarizer.diarize(str(path), num_speakers=num)
+    words = transcriber.transcribe_words(str(path))
+    idents = identify_speakers(turns, centroids, gallery or {},
+                               cfg.identify_threshold, cfg.identify_min_speech)
+    names = name_speakers(turns, centroids, gallery or {},
+                          cfg.identify_threshold, cfg.identify_min_speech, idents=idents)
+    segments = group_words_by_speaker(words, turns, mapping=names)
+    return Analysis(segments, turns, centroids, names, idents)
+
+
 def process_file(path: Path, cfg: Config, transcriber: Transcriber,
-                 notifier=None, diarizer=None) -> dict:
-    """Обработать один файл: транскрипция (→ диаризация) → запись → доставка → архив."""
-    if diarizer is not None:
-        # Точная диаризация: слова с тайм-кодами → разметка по спикерам → склейка в реплики.
-        from .diarize import group_words_by_speaker
-        num = cfg.num_speakers or None
-        turns = diarizer.diarize(str(path), num_speakers=num)
-        words = transcriber.transcribe_words(str(path))
-        segments = group_words_by_speaker(words, turns)
-    else:
-        segments = transcriber.transcribe(str(path))
+                 notifier=None, diarizer=None, gallery=None) -> dict:
+    """Обработать один файл: транскрипция (→ диаризация → имена) → запись → доставка → архив."""
+    result = analyze(path, cfg, transcriber, diarizer, gallery)
+    segments = result.segments
     period = derive_period(path)
     base = path.stem
 
     out_dir = cfg.output / period
     outputs = write_outputs(segments, out_dir, base)
+
+    # Сайдкар для разметки голосов — до архивации: клипы режутся из исходного аудио.
+    # Пишется и при пустой базе: иначе первый голос завести неоткуда.
+    speakers = None
+    if diarizer is not None and cfg.identify:
+        speakers = _write_speakers(cfg, path, period, base, outputs, result.turns,
+                                   result.centroids, result.names, result.idents, segments)
 
     delivery = _deliver(notifier, outputs["txt"], base)
     # Сбой доставки (сеть/Telegram недоступны) — в очередь на автоповтор следующим прогоном.
@@ -156,7 +191,23 @@ def process_file(path: Path, cfg: Config, transcriber: Transcriber,
         "archived": dest,
         "delivery": delivery,
         "artifact": artifact,
+        "speakers": speakers,
     }
+
+
+def _write_speakers(cfg, path, period, base, outputs, turns, centroids, names, idents,
+                    segments) -> dict:
+    """Сайдкар записи (speakers.py). Никогда не роняет обработку: транскрипт уже готов."""
+    from . import speakers as spk
+
+    try:
+        sidecar = spk.write(cfg, path, period=period, base=base, outputs=outputs,
+                            turns=turns, centroids=centroids, names=names, idents=idents,
+                            segments=segments)
+        return {"status": "written", "pending": spk.pending_count(sidecar),
+                "path": str(spk.sidecar_dir(cfg, period, base) / spk.FILE_NAME)}
+    except Exception as e:  # noqa: BLE001
+        return {"status": f"failed: {redact(str(e))}", "pending": 0}
 
 
 def _segments_duration(segments: list[dict]) -> Optional[int]:
@@ -191,6 +242,12 @@ def _handoff(audio_path: Path, outputs: dict, segments: list[dict], cfg: Config)
         return f"failed: {redact(str(e))}"
 
 
+def _load_gallery(cfg: Config) -> dict:
+    """База голосов для матчинга. Нет каталога — пустая база, «Спикер N» везде."""
+    from .voices import VoiceStore
+    return VoiceStore(cfg.voices_dir).gallery()
+
+
 def _build_diarizer(cfg: Config):
     """Создать Diarizer, если диаризация включена и есть HF-токен; иначе None."""
     if not cfg.diarize:
@@ -206,10 +263,11 @@ def process_inbox(cfg: Config, transcriber: Optional[Transcriber] = None,
     """Обработать весь inbox пакетом. Возвращает {'processed': [...], 'errors': [...]}."""
     cfg.ensure_dirs()
     results = {"processed": [], "errors": [], "redelivered": [], "pending": [],
-               "given_up": []}
+               "given_up": [], "identify_error": None}
 
     def _run():
         nonlocal transcriber, diarizer
+        gallery = None
         # Сначала досылаем всё, что не ушло в прошлые разы (сеть могла вернуться).
         # Дёшево: модель НЕ грузим, если транскрибировать нечего — прогон может быть
         # чисто «досыльным» (inbox пуст, но в очереди висит недоставленное).
@@ -221,10 +279,24 @@ def process_inbox(cfg: Config, transcriber: Optional[Transcriber] = None,
             transcriber = transcriber or Transcriber(model_type=cfg.model_type)
             if diarizer is None:
                 diarizer = _build_diarizer(cfg)
+            # Идентификация — только поверх диаризации; база читается раз на прогон.
+            # Битая база не должна останавливать транскрипцию: имена — опция,
+            # файлы копились бы в inbox из-за одного испорченного json.
+            if diarizer is not None and cfg.identify:
+                try:
+                    gallery = _load_gallery(cfg)
+                except Exception as e:  # noqa: BLE001
+                    results["identify_error"] = redact(str(e))
+                # Старые сайдкары с клипами и векторами — биометрия, чистим по возрасту.
+                try:
+                    from . import speakers as spk
+                    spk.sweep(cfg)
+                except Exception:  # noqa: BLE001
+                    pass
         for path in files:
             try:
                 results["processed"].append(
-                    process_file(path, cfg, transcriber, notifier, diarizer)
+                    process_file(path, cfg, transcriber, notifier, diarizer, gallery)
                 )
             except Exception as e:  # noqa: BLE001 — один файл не должен ронять пакет
                 results["errors"].append({"source": path.name, "error": redact(str(e))})
