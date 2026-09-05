@@ -36,11 +36,33 @@ func test(_ name: String, _ body: () throws -> Void) {
 
 // MARK: helpers
 
+/// Домены тестовых defaults. В конце прогона каждый снимается, но cfprefsd оставляет пустой
+/// `{}`-файл и дописывает его уже после выхода процесса — поэтому файлы прошлых прогонов
+/// сметаются ещё и при старте, иначе в ~/Library/Preferences копится по plist на тест.
+var testSuites: [String] = []
+let preferencesDirectory = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Preferences")
+
+func sweepTestDefaults() {
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: preferencesDirectory.path)) ?? []
+    for name in names where name.hasPrefix("mlaud.test.") && name.hasSuffix(".plist") {
+        try? FileManager.default.removeItem(at: preferencesDirectory.appendingPathComponent(name))
+    }
+}
+
 func makeDefaults() -> UserDefaults {
     let suite = "mlaud.test.\(UUID().uuidString)"
     let d = UserDefaults(suiteName: suite)!
     d.removePersistentDomain(forName: suite)
+    testSuites.append(suite)
     return d
+}
+
+func removeTestDefaults() {
+    for suite in testSuites {
+        UserDefaults.standard.removePersistentDomain(forName: suite)
+    }
+    sweepTestDefaults()
 }
 
 func makeTempDir() throws -> URL {
@@ -54,6 +76,8 @@ func writeFile(_ dir: URL, _ name: String, bytes: Int = 4) throws {
     try Data(repeating: 0x61, count: bytes)
         .write(to: dir.appendingPathComponent(name))
 }
+
+sweepTestDefaults()
 
 // MARK: FolderStore
 
@@ -798,5 +822,276 @@ test("VoiceListing: разбор вывода list --json") {
     eq(listing.people[0].samples[0].speechSec, 130.0, "речь образца")
 }
 
+
+// MARK: RecordingIndex
+
+test("RecordingIndex: сайдкары, старые записи без .meta.json, разметка, итоги суфлёра") {
+    let tmp = try makeTempDir()
+    let root = tmp.appendingPathComponent("AllOutputs")
+    let speakers = tmp.appendingPathComponent("speakers")
+    let fm = FileManager.default
+    func put(_ dir: URL, _ name: String, _ text: String = "x") throws {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try text.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    let sep = root.appendingPathComponent("2026-09")
+    try put(sep, "2026-09-03_21-43-04_Запись 15.txt")
+    try put(sep, "2026-09-03_21-43-04_Запись 15.srt")
+    try put(sep, "2026-09-03_21-43-04_Запись 15.prompter.md")
+    try put(sep, "2026-09-03_21-43-04_Запись 15.meta.json", """
+    {"meeting_id": "044d", "started_at": "2026-09-03T21:43:05+03:00", "duration_sec": 9,
+     "asr_root": "\(tmp.path)", "audio_path": "Processed/AllRecords/2026-09/x.m4a", "source": "mlaud"}
+    """)
+    try put(sep, "rec.txt")
+    try put(sep, "rec.meta.json", #"{"started_at": "2026-09-01T10:00:00+03:00", "duration_sec": 1284.3}"#)
+    try put(sep, "битый.txt")
+    try put(sep, "битый.meta.json", "{не json")
+    try put(sep, ".DS_Store")
+    let aug = root.appendingPathComponent("2026-08")
+    try put(aug, "2026-08-20_10-00-00_Запись 7.txt")
+    let old = root.appendingPathComponent("2026-07")
+    try put(old, "Старая запись.txt")
+    try put(old, "Старая запись.srt")
+    let mtime = Date(timeIntervalSince1970: 1_753_000_000)  // 2025-07-20
+    try fm.setAttributes([.modificationDate: mtime], ofItemAtPath: old.appendingPathComponent("Старая запись.txt").path)
+    try put(root, "не каталог.txt")
+    try put(speakers.appendingPathComponent("2026-09/rec"), "speakers.json", sidecarJSON)
+
+    let recs = RecordingIndex(root: root, speakersRoot: speakers).scan()
+    // «битый» без годного сайдкара датируется созданием файла — то есть «сейчас»,
+    // поэтому он выше сентябрьских записей с точной датой.
+    eq(recs.map(\.base), ["битый", "2026-09-03_21-43-04_Запись 15", "rec", "2026-08-20_10-00-00_Запись 7", "Старая запись"], "новые сверху, файл в корне пропущен")
+
+    let full = recs[1]
+    check(full.dateIsExact, "дата из сайдкара")
+    eq(full.durationSec, 9, "длительность")
+    eq(full.srt?.lastPathComponent, "2026-09-03_21-43-04_Запись 15.srt", "srt рядом")
+    eq(full.audio?.path, tmp.appendingPathComponent("Processed/AllRecords/2026-09/x.m4a").path, "аудио от asr_root")
+    check(full.hasPrompter, "итоги суфлёра найдены")
+    check(full.speakers.isEmpty && !full.needsLabeling, "без сайдкара разметки — без говорящих")
+    eq(full.id, "2026-09/2026-09-03_21-43-04_Запись 15", "id = период/base")
+
+    let rec = recs[2]
+    eq(rec.speakers, ["я", "Дина П(?)", "Спикер 4"], "имена: уверенный, неуверенный с пометкой, длинный без имени; короткий выброшен")
+    check(rec.needsLabeling, "неуверенный кластер — к разметке")
+    eq(rec.durationSec, 1284.3, "длительность из сайдкара")
+
+    let broken = recs[0]
+    check(!broken.dateIsExact && broken.durationSec == nil, "битый сайдкар = как без сайдкара")
+
+    let named = recs[3]
+    check(named.dateIsExact && named.durationSec == nil, "дата из имени файла — точная, длительности нет")
+    var stamp = DateComponents(); stamp.year = 2026; stamp.month = 8; stamp.day = 20; stamp.hour = 10
+    eq(named.date, Calendar.current.date(from: stamp), "2026-08-20 10:00 по местному времени")
+    check(RecordingIndex.dateFromName("2026-13-40_99-00-00_x") == nil, "мусорная дата в имени — nil")
+    check(RecordingIndex.dateFromName("Старая запись") == nil, "без штампа — nil")
+
+    let legacy = recs[4]
+    check(!legacy.dateIsExact, "без сайдкара дата не точная")
+    eq(legacy.date, mtime, "дата — mtime транскрипта")
+    check(legacy.durationSec == nil && legacy.srt != nil && legacy.audio == nil, "без длительности и аудио, srt есть")
+
+    let groups = RecordingIndex.grouped(recs)
+    eq(groups.map(\.period), ["2026-09", "2026-08", "2026-07"], "периоды в порядке записей")
+    eq(groups[0].items.count, 3, "три записи сентября")
+
+    eq(RecordingIndex(root: tmp.appendingPathComponent("нет")).scan().count, 0, "нет каталога — пусто")
+}
+
+test("RecordingIndex: без сайдкара дата — самая ранняя из создания и изменения; вне месяца каталога — не дата") {
+    let tmp = try makeTempDir()
+    let root = tmp.appendingPathComponent("AllOutputs")
+    let fm = FileManager.default
+    let aug = root.appendingPathComponent("2026-08")
+    try fm.createDirectory(at: aug, withIntermediateDirectories: true)
+    func put(_ name: String, created: Date, modified: Date) throws {
+        let url = aug.appendingPathComponent(name)
+        try "x".write(to: url, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.creationDate: created, .modificationDate: modified], ofItemAtPath: url.path)
+    }
+    let cal = Calendar.current
+    let aug17 = cal.date(from: DateComponents(year: 2026, month: 8, day: 17, hour: 10, minute: 40))!
+    let sep5 = cal.date(from: DateComponents(year: 2026, month: 9, day: 5, hour: 0, minute: 29))!
+    let aug20 = cal.date(from: DateComponents(year: 2026, month: 8, day: 20, hour: 9))!
+    // Транскрипт переписан переразметкой 5 сентября: mtime врёт, создание — правда.
+    try put("17.08 заметка.txt", created: aug17, modified: sep5)
+    // Скопирован в архив целиком уже в сентябре: обе даты вне августа.
+    try put("чужой.txt", created: sep5, modified: sep5)
+    try put("2026-08-20_10-00-00_Запись 7.txt", created: sep5, modified: sep5)
+    _ = aug20
+
+    let recs = RecordingIndex(root: root).scan()
+    eq(recs.map(\.base), ["2026-08-20_10-00-00_Запись 7", "17.08 заметка", "чужой"],
+       "точная дата, затем правдоподобная, чужая — в конец несмотря на поздний mtime")
+    let rewritten = recs[1]
+    eq(rewritten.date, aug17, "дата создания, а не изменения")
+    check(!rewritten.dateIsExact && rewritten.dateFitsPeriod, "приблизительная, но в своём месяце")
+    let foreign = recs[2]
+    check(!foreign.dateIsExact && !foreign.dateFitsPeriod, "вне месяца каталога — показывать нельзя")
+    check(recs[0].dateIsExact, "дата из имени файла точная")
+
+    check(RecordingIndex.month(ofPeriod: "2026-06-21")! == (2026, 6), "старый каталог по дню — тоже месяц")
+    check(RecordingIndex.month(ofPeriod: "прочее") == nil, "не период — nil")
+    check(RecordingIndex.month(ofPeriod: "2026-13") == nil, "месяц 13 — nil")
+}
+
+test("RecordingIndex.matches: по имени, говорящим и дате, все слова запроса") {
+    let cal = Calendar.current
+    let date = cal.date(from: DateComponents(year: 2026, month: 9, day: 3, hour: 21, minute: 43))!
+    let rec = Recording(id: "2026-09/2026-09-03_21-43-04_Запись 15", base: "2026-09-03_21-43-04_Запись 15",
+                        period: "2026-09", txt: URL(fileURLWithPath: "/x.txt"), srt: nil, audio: nil,
+                        date: date, dateIsExact: true, durationSec: nil,
+                        speakers: ["я", "Дина П(?)", "Спикер 4"], needsLabeling: true, hasPrompter: false)
+    check(RecordingIndex.matches(rec, query: ""), "пустой запрос — всё")
+    check(RecordingIndex.matches(rec, query: "дина"), "по говорящему, без учёта регистра")
+    check(RecordingIndex.matches(rec, query: "запись 15"), "по имени, два слова")
+    check(RecordingIndex.matches(rec, query: "03.09"), "по дате дд.мм")
+    check(RecordingIndex.matches(rec, query: "2026-09-03 дина"), "дата и говорящий вместе")
+    check(!RecordingIndex.matches(rec, query: "дина бухгалтер"), "одно слово не нашлось — нет")
+    let foreign = Recording(id: "2026-08/чужой", base: "чужой", period: "2026-08",
+                            txt: URL(fileURLWithPath: "/y.txt"), srt: nil, audio: nil,
+                            date: date, dateIsExact: false, durationSec: nil,
+                            speakers: [], needsLabeling: false, hasPrompter: false)
+    check(!RecordingIndex.matches(foreign, query: "03.09"), "недостоверная дата в поиск не идёт")
+}
+
+test("VoicesPresentation.needsNameField: поле имени только там, где имя ещё не стоит") {
+    let s = try JSONDecoder().decode(SpeakerSidecar.self, from: Data(sidecarJSON.utf8))
+    check(!VoicesPresentation.needsNameField(s.clusters[0]), "уверенно узнан — поля нет, имя меняют карандашом")
+    check(VoicesPresentation.needsNameField(s.clusters[1]), "неуверенный — поле есть")
+    check(VoicesPresentation.needsNameField(s.clusters[2]), "короткий — поле есть, имя пойдёт в транскрипт")
+    check(!VoicesPresentation.needsNameField(SpeakerCluster(label: "S", display: "Спикер 9", speechSec: 60, assigned: "Кира Л")),
+          "подписан — поля нет")
+    check(!VoicesPresentation.needsNameField(SpeakerCluster(label: "S", display: "Спикер 7", speechSec: 200, dismissed: true, mixed: true)),
+          "свёрнут — поля нет")
+    let rejected = SpeakerCluster(label: "S", display: "Спикер 9", speechSec: 60,
+                                  match: SpeakerMatch(name: "я", score: 0.9, sure: true), rejected: ["я"])
+    check(VoicesPresentation.needsNameField(rejected), "после «Не он» поле возвращается")
+}
+
+// MARK: OverviewState
+
+test("RussianPlural: формы") {
+    for (n, want) in [(1, "файл"), (2, "файла"), (5, "файлов"), (11, "файлов"), (21, "файл"), (112, "файлов"), (0, "файлов")] {
+        eq(RussianPlural.form(n, "файл", "файла", "файлов"), want, "\(n)")
+    }
+}
+
+test("OverviewState: правила показа") {
+    var s = OverviewState()
+    check(!s.hasFolder && !s.canProcessNow, "без папки обработка недоступна")
+    eq(s.pipeline.tone, .muted, "без папки — приглушённая плашка")
+    check(s.queueLines.isEmpty && s.deliveryLine == nil, "пустая очередь — без строк")
+
+    s.inboxPath = "/x"; s.status = .idle
+    check(s.canProcessNow, "папка есть, ничего не идёт — можно")
+    s.status = .processing(current: 1, total: 3)
+    check(s.isProcessing && !s.canProcessNow, "во время обработки нельзя")
+    eq(s.pipeline.tone, .accent, "обработка — акцент")
+    s.status = .error("worker exit 1")
+    eq(s.pipeline.tone, .danger, "ошибка — danger")
+    eq(s.pipeline.text, "Ошибка: worker exit 1", "текст как в меню")
+
+    s.ready = 2; s.downloading = 1; s.pendingDelivery = 5
+    eq(s.queueLines, ["2 файла ждут обработки", "1 докачивается из iCloud"], "очередь")
+    eq(s.deliveryLine, "5 файлов ждут отправки в Telegram", "доставка")
+    s.ready = 1; s.downloading = 3
+    eq(s.queueLines, ["1 файл ждёт обработки", "3 докачиваются из iCloud"], "единственное число")
+}
+
+test("InboxScanner: докачивающиеся из iCloud") {
+    let dir = try makeTempDir()
+    try writeFile(dir, ".a.m4a.icloud")
+    try writeFile(dir, "b.m4a")
+    try writeFile(dir, ".c.txt.icloud")
+    try writeFile(dir, ".hidden.m4a")
+    let names = InboxScanner().downloadingAudioFiles(in: dir).map(\.lastPathComponent)
+    eq(names, [".a.m4a.icloud"], "только плейсхолдеры аудио")
+}
+
+
+test("PhoneReceipts: журнал приёма — словарь по id, новые сверху, битый файл пуст") {
+    let json = """
+    {"a1": {"deviceID": "D", "id": "a1", "name": "2026-08-31_16-37-45_Запись 10.m4a",
+            "receivedAt": "2026-09-01T16:17:01Z", "sha256": "…", "size": 100},
+     "b2": {"id": "b2", "name": "2026-09-03_21-43-04_Запись 15.m4a",
+            "receivedAt": "2026-09-03T18:43:14.250Z", "size": 54305}}
+    """
+    let list = PhoneReceipts.parse(Data(json.utf8))
+    eq(list.map(\.id), ["b2", "a1"], "новые сверху, доли секунды читаются")
+    eq(list[0].size, 54305, "размер")
+    check(list[0].deviceID == nil && list[1].deviceID == "D", "deviceID необязателен")
+    eq(PhoneReceipts.parse(Data("{не json".utf8)).count, 0, "битый — пусто")
+    eq(PhoneReceipts.load(URL(fileURLWithPath: "/nonexistent/received.json")).count, 0, "нет файла — пусто")
+}
+
+// MARK: VoicesPresentation
+
+test("VoicesPresentation: подписи записи и карточек — как в прежнем окне") {
+    let s = try JSONDecoder().decode(SpeakerSidecar.self, from: Data(sidecarJSON.utf8))
+    eq(VoicesPresentation.recordingStatus(s), "1 к разметке", "ждёт один")
+    eq(VoicesPresentation.mmss(389.2), "6:29", "минуты:секунды")
+    eq(VoicesPresentation.clusterTitle(s.clusters[0]), "Спикер 1 · 6:29 речи · с 0:00", "заголовок карточки")
+    eq(VoicesPresentation.clusterSubtitle(s.clusters[0], minSpeech: 30), "«смотрите»", "длинный — цитата")
+    eq(VoicesPresentation.clusterSubtitle(s.clusters[2], minSpeech: 30),
+       "речи меньше 0:30: имя пойдёт только в транскрипт, отпечаток в базу не снять · «угу»",
+       "короткий — объяснение FR-8.9 и цитата")
+    eq(VoicesPresentation.clusterSubtitle(s.clusters[1], minSpeech: 30), "", "без цитаты — пусто")
+    eq(VoicesPresentation.clipTitle(s.clusters[0], index: 1), "6:19", "таймкод клипа")
+    eq(VoicesPresentation.clipTitle(s.clusters[1], index: 0), "1", "без clip_starts — номер")
+
+    eq(VoicesPresentation.badge(for: s.clusters[0]), .sure("я", 0.829), "уверенный")
+    eq(VoicesPresentation.badge(for: s.clusters[0])?.text, "✓ я · 0.83", "плашка уверенного")
+    eq(VoicesPresentation.badge(for: s.clusters[1])?.text, "Дина П (?) · 0.77", "плашка неуверенного")
+    check(VoicesPresentation.badge(for: s.clusters[2]) == nil, "не узнан — плашки нет")
+    let assigned = SpeakerCluster(label: "S", display: "Спикер 9", speechSec: 60, assigned: "Кира Л")
+    eq(VoicesPresentation.badge(for: assigned), .assigned("Кира Л"), "подписан")
+    let mixed = SpeakerCluster(label: "S", display: "Спикер 7", speechSec: 200, dismissed: true, mixed: true)
+    eq(VoicesPresentation.badge(for: mixed)?.text, "смесь / неразборчиво", "смесь")
+    let hidden = SpeakerCluster(label: "S", display: "Спикер 8", speechSec: 200, hidden: true)
+    eq(VoicesPresentation.badge(for: hidden), .hidden, "убран корзиной")
+    let dismissed = SpeakerCluster(label: "S", display: "Спикер 8", speechSec: 200, dismissed: true)
+    eq(VoicesPresentation.badge(for: dismissed), .unnamed, "оставлен без имени")
+    eq(VoicesPresentation.clusterSubtitle(dismissed, minSpeech: 30), "", "свёрнутый короткого объяснения не получает")
+
+    let allNamed = """
+    {"source": "a.m4a", "min_speech": 30, "clusters": [
+      {"label": "S1", "display": "Спикер 1", "speech_sec": 100, "embedding": [0.1], "assigned": "я"}]}
+    """
+    eq(VoicesPresentation.recordingStatus(try JSONDecoder().decode(SpeakerSidecar.self, from: Data(allNamed.utf8))),
+       "все названы", "все названы")
+    let shortOnly = """
+    {"source": "a.m4a", "min_speech": 30, "clusters": [
+      {"label": "S1", "display": "Спикер 1", "speech_sec": 10, "embedding": [0.1]}]}
+    """
+    eq(VoicesPresentation.recordingStatus(try JSONDecoder().decode(SpeakerSidecar.self, from: Data(shortOnly.utf8))),
+       "нечего размечать: речи меньше 30 с", "нечего размечать")
+}
+
+test("VoicesPresentation: строки вкладки «Люди»") {
+    let json = """
+    {"root": "/v", "people": [
+      {"name": "Милана Г", "created": "2026-09-03T10:00:00+00:00", "samples": [
+        {"id": "a1", "source_file": "rec.m4a", "label": "SPEAKER_01", "speech_sec": 54.6,
+         "channel": "phone", "added": "2026-09-03T10:00:00+00:00"}]},
+      {"name": "я", "created": "2026-08-20T10:00:00+00:00", "samples": [
+        {"id": "b1", "source_file": "a.m4a", "label": "S", "speech_sec": 300, "channel": "vks", "added": "2026-08-20T10:00:00+00:00"},
+        {"id": "b2", "source_file": "b.m4a", "label": "S", "speech_sec": 120, "channel": "weird", "added": "2026-08-21T10:00:00+00:00"},
+        {"id": "b3", "source_file": "c.m4a", "label": "S", "speech_sec": 45, "channel": "other", "added": "2026-08-22T10:00:00+00:00"},
+        {"id": "b4", "source_file": "d.m4a", "label": "S", "speech_sec": 45, "channel": "other", "added": "2026-08-23T10:00:00+00:00"},
+        {"id": "b5", "source_file": "e.m4a", "label": "S", "speech_sec": 45, "channel": "other", "added": "2026-08-24T10:00:00+00:00"}]}
+    ]}
+    """
+    let listing = try VoiceListing.parse(Data(json.utf8))
+    eq(VoicesPresentation.personLine(listing.people[0]), "1 образец · с 2026-09-03", "один образец")
+    eq(VoicesPresentation.personLine(listing.people[1]), "5 образцов · с 2026-08-20", "пять образцов")
+    eq(VoicesPresentation.sampleLine(listing.people[0].samples[0]), "54 с · телефон · rec.m4a · 2026-09-03", "образец")
+    eq(VoicesPresentation.sampleLine(listing.people[1].samples[1]), "120 с · weird · b.m4a · 2026-08-21", "неизвестный канал — как есть")
+    eq(VoicesPresentation.channelTitle("vks"), "ВКС", "канал")
+    eq(VoicesPresentation.channels.map(\.value), ["phone", "vks", "other"], "порядок каналов — как в worker'е")
+    eq(listing.people.map(\.id), ["Милана Г", "я"], "человек идентифицируется именем")
+}
+
+removeTestDefaults()
 print("\n==== Swift tests: \(passed) passed, \(failed) failed ====")
 exit(failed == 0 ? 0 : 1)

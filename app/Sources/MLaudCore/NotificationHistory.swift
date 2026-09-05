@@ -1,7 +1,7 @@
 import Foundation
 
 /// Одно сообщение приложения: ровно то, что показывает баннер в углу экрана.
-public struct AppNotification: Codable, Equatable, Sendable {
+public struct AppNotification: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public let title: String
     public let body: String

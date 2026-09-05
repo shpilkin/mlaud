@@ -7,7 +7,8 @@ import Foundation
 // что диктовка отвалилась.
 signal(SIGPIPE, SIG_IGN)
 
-// Меню-бар приложение без иконки в Dock (accessory).
+// Обычное приложение с иконкой в Dock, пока запущено (решение пользователя 2026-09-05,
+// ux-app.md §1); закрытие окна его не завершает — слежение и приём работают из строки меню.
 let app = NSApplication.shared
 
 // Дымовая проверка окна «Голоса» без UI-автоматизации (ей нужен «Универсальный доступ»):
@@ -19,7 +20,14 @@ if let i = CommandLine.arguments.firstIndex(of: "--smoke-voices"),
                          workerDir: a[i + 3], voicesDir: a[i + 4]))
 }
 
-let delegate = AppDelegate()
+// Снимки экранов главного окна для проверки вида: MLaudApp --screenshot <каталог>.
+let screenshotDirectory: URL? = {
+    guard let i = CommandLine.arguments.firstIndex(of: "--screenshot"),
+          CommandLine.arguments.count > i + 1 else { return nil }
+    return URL(fileURLWithPath: CommandLine.arguments[i + 1], isDirectory: true)
+}()
+
+let delegate = AppDelegate(screenshotDirectory: screenshotDirectory)
 app.delegate = delegate
-app.setActivationPolicy(.accessory)
+app.setActivationPolicy(.regular)
 app.run()

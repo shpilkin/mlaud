@@ -17,6 +17,13 @@ enum DictationLog {
         return f
     }()
 
+    /// Последние `count` строк журнала для экрана; нет файла — пусто.
+    static func tail(_ count: Int) -> [String] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        return Array(lines.suffix(count))
+    }
+
     static func write(_ message: String) {
         let line = "\(stamp.string(from: Date()))  \(message)\n"
         queue.async {

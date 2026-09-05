@@ -27,8 +27,13 @@ final class PhoneSyncController {
         }
     }
 
+    struct Received: Equatable {
+        let name: String
+        let at: Date
+    }
+
     private(set) var state: State = .disabled
-    private(set) var lastReceived: (name: String, at: Date)?
+    private(set) var lastReceived: Received?
 
     /// Вызывается после успешного приёма — снаружи это повод сразу запустить обработку.
     var onReceived: ((String) -> Void)?
@@ -97,7 +102,7 @@ final class PhoneSyncController {
         case .listening(let port):
             state = .listening(port: port)
         case .received(let name, _, _):
-            lastReceived = (name, Date())
+            lastReceived = Received(name: name, at: Date())
             onReceived?(name)
         case .failed(let reason):
             state = .failed(reason)

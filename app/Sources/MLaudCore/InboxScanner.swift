@@ -41,6 +41,34 @@ public struct InboxScanner {
         return true
     }
 
+    /// Аудио, которое ещё едет из iCloud: плейсхолдеры `.icloud` и выгруженные файлы.
+    /// Для экрана: «N докачиваются» — иначе непонятно, почему очередь пуста, а файл есть.
+    public func downloadingAudioFiles(in folder: URL) -> [URL] {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey],
+            options: []
+        ) else { return [] }
+        return items.filter { url in
+            var name = url.lastPathComponent
+            if name.hasSuffix(".icloud") {
+                // «.имя.m4a.icloud» — плейсхолдер невыгруженного файла.
+                name = String(name.dropLast(".icloud".count))
+                if name.hasPrefix(".") { name.removeFirst() }
+                return audioExtensions.contains((name as NSString).pathExtension.lowercased())
+            }
+            guard !name.hasPrefix("."),
+                  audioExtensions.contains(url.pathExtension.lowercased()),
+                  let values = try? url.resourceValues(forKeys: [
+                    .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]),
+                  values.isUbiquitousItem == true,
+                  let status = values.ubiquitousItemDownloadingStatus
+            else { return false }
+            return status != .current
+        }
+    }
+
     /// Готовые аудиофайлы в папке, отсортированные по имени.
     public func readyAudioFiles(in folder: URL) -> [URL] {
         let fm = FileManager.default
