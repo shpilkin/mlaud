@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import MLaudCore
+import SwiftUI
 
 /// `MLaudApp --screenshot <каталог>`: открыть главное окно, снять каждый раздел в светлой и
 /// тёмной теме в PNG и выйти. Проверка вида без рук и без «Универсального доступа», как
@@ -14,6 +15,7 @@ enum Screenshots {
         struct Job {
             let file: String
             let appearance: NSAppearance.Name
+            var window: NSWindow? = nil
             let prepare: (AppModel) -> Void
         }
         let appearances: [(String, NSAppearance.Name)] = [("light", .aqua), ("dark", .darkAqua)]
@@ -51,8 +53,62 @@ enum Screenshots {
                             $0.callApps = snapshot.apps
                             $0.callAppPID = snapshot.selected
                             $0.calls = snapshot.calls
+                            $0.prompterView = .list
                         })
                     }
+                    // Этап 4: редактор брифа, карточки/пауза/итоги звонка, экран итогов, компакт.
+                    jobs.append(contentsOf: [
+                        Job(file: "3f-brief-editor-\(suffix)", appearance: name) {
+                            $0.section = .prompter
+                            $0.prompterView = .editor
+                            $0.editingBriefSlug = "interview-ivan"
+                            $0.editingBrief = try? BriefParser.parse(CallFixtures.briefText)
+                            $0.editingMaterials = CallFixtures.materialsReport
+                        },
+                        Job(file: "3g-call-cards-\(suffix)", appearance: name) {
+                            $0.section = .prompter
+                            $0.call = CallFixtures.runningCards.call
+                            $0.callApps = CallFixtures.apps
+                            $0.callAppPID = 4242
+                        },
+                        Job(file: "3h-call-paused-cost-\(suffix)", appearance: name) {
+                            $0.section = .prompter
+                            $0.call = CallFixtures.runningCards.call
+                            $0.call.prompter.status = .pausedByCost(costUSD: 0.051, ceilingUSD: 0.05)
+                            $0.callApps = CallFixtures.apps
+                            $0.callAppPID = 4242
+                        },
+                        Job(file: "3i-call-finishing-\(suffix)", appearance: name) {
+                            $0.section = .prompter
+                            var call = CallFixtures.runningCards.call
+                            call.phase = .finishing
+                            call.prompter.outcomeState = .computing
+                            $0.call = call
+                        },
+                        Job(file: "3j-outcome-\(suffix)", appearance: name) {
+                            $0.section = .prompter
+                            $0.prompterView = .outcome(callID: CallFixtures.outcomeCallID)
+                            $0.calls = [CallFixtures.outcomeRecord]
+                            CallFixtures.seedOutcome()
+                        },
+                        Job(file: "3k-compact-\(suffix)", appearance: name,
+                            window: CallFixtures.compactWindow()) {
+                            $0.section = .prompter
+                            $0.call = CallFixtures.runningCards.call
+                            let window = CallFixtures.compactWindow()
+                            window.contentView = NSHostingView(rootView: CompactView(model: $0))
+                            window.setContentSize(NSSize(width: 380, height: 460))
+                        },
+                    ])
+                }
+                if section == .settings {
+                    jobs.append(Job(file: "8b-settings-prompter-\(suffix)", appearance: name) {
+                        $0.section = .settings
+                        $0.settingsTab = .prompter
+                        $0.settings.connections = LLMConnection.presets
+                        $0.settings.connectionHasKey = [LLMConnection.presets[0].id: true]
+                        $0.settings.connectionCheck = [LLMConnection.presets[1].id: .ok(ttftMs: 2600)]
+                    })
                 }
             }
         }
@@ -67,7 +123,7 @@ enum Screenshots {
             job.prepare(model)
             // Два прохода цикла: SwiftUI перерисовывает раздел и тему не в том же тике.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                if let view = controller.window?.contentView {
+                if let view = (job.window?.contentView ?? controller.window?.contentView) {
                     view.layoutSubtreeIfNeeded()
                     if let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                         view.cacheDisplay(in: view.bounds, to: rep)
@@ -187,6 +243,130 @@ enum CallFixtures {
         f.call.result = URL(fileURLWithPath: "/Users/me/ASR/Inbox/AllRecords/2026-09-05_14-11-09.m4a")
         return f
     }
+}
+
+// MARK: - фикстуры этапа 4: редактор, карточки, итоги, компактная панель
+
+extension CallFixtures {
+    /// ok-full из общих фикстур worker — редактор снимается на настоящем брифе.
+    static var briefText: String {
+        let url = URL(fileURLWithPath: #filePath)      // app/Sources/MLaudApp/Screenshots.swift
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("worker/tests/fixtures/brief/ok-full.md")
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? "---\ntitle: Бриф\nmode: vks\n---\n"
+    }
+
+    static let materialsReport: MaterialsReport = {
+        var report = MaterialsReport()
+        report.materials = [
+            MaterialInfo(name: "резюме.pdf", kind: "pdf", tokens: 2100),
+            MaterialInfo(name: "скан.pdf", kind: "pdf", tokens: 0, warning: "нет текстового слоя, пропущен"),
+            MaterialInfo(name: "план-витрин.xlsx", kind: "xlsx", tokens: 0, warning: "тип не поддерживается"),
+        ]
+        report.total = 2100
+        report.budget = 120000
+        report.over = ["большой-отчёт.docx"]
+        return report
+    }()
+
+    /// Экран звонка с работающим суфлёром: карточки, повестка, вопрос висит (UX:275).
+    static var runningCards: Fixture {
+        var f = running
+        f.call.title = "Интервью — Иван Петров, senior BA"
+        var p = PrompterSnapshot()
+        p.status = .ready
+        p.connectionName = "DeepSeek V4 Flash (OpenRouter)"
+        p.briefTitle = f.call.title
+        p.briefLoaded = true
+        p.contextTokens = 31400
+        p.agenda = [AgendaItem(item: "Знакомство и мотивация", status: .done),
+                    AgendaItem(item: "Опыт: два кейса подробно", status: .active),
+                    AgendaItem(item: "Кейс-задача", status: .pending)]
+        p.pinned = [PromptCard(id: "1.1", type: .answer, priority: 1,
+                               text: "Спросить про метрики кейса")]
+        p.cards = [
+            PromptCard(id: "2.1", type: .answer, priority: 1, text: "Ответить: аналитика процесса, 6 лет"),
+            PromptCard(id: "2.2", type: .fact, priority: 2, text: "В резюме: вёл команду из трёх", source: "резюме.pdf"),
+            PromptCard(id: "t.50", type: .time, priority: 1, text: "Половина времени. Не начаты: Кейс-задача."),
+        ]
+        p.questionPending = true
+        p.turns = 2
+        p.lastLatencyMs = 5700
+        p.lastFirstCardMs = 3400
+        p.lastCachedTokens = 33024
+        p.costUSD = 0.012
+        p.notes = ["проверить зарплатные ожидания"]
+        f.call.prompter = p
+        return f
+    }
+
+    static let outcomeCallID = "2026-09-04_15-30-05"
+
+    static var outcomeRecord: CallRecord {
+        var r = CallRecord(callID: outcomeCallID, startedAt: date("2026-09-04T12:30:05Z"),
+                           model: "rnnt", channels: ["0": "Я", "1": "Иван Петров"])
+        r.endedAt = date("2026-09-04T12:40:17Z")
+        r.durationSec = 612.4
+        r.brief = "Интервью — Иван Петров, senior BA"
+        r.briefDir = "interview-ivan"
+        r.recording = "2026-09-04_15-30-05.m4a"
+        r.meetingID = "m-1"
+        r.prompter = CallRecord.PrompterStats(
+            enabled: true, connection: "DeepSeek V4 Flash (OpenRouter)",
+            llmModel: "deepseek/deepseek-v4-flash", turns: 7, promptTokens: 236000,
+            cachedTokens: 231000, completionTokens: 2100, costUSD: 0.012, firstCardMsMedian: 3400)
+        r.goalResult = .partial
+        return r
+    }
+
+    /// Экран итогов читает outcome.json/outcome.md из папки звонка — сеём их в resolve().calls.
+    static func seedOutcome() {
+        let root = PrompterPaths.resolve().calls
+        if CallStore.read(root: root, callID: outcomeCallID) == nil {
+            try? CallStore.write(outcomeRecord, root: root)
+        }
+        let dir = CallStore.folder(root: root, callID: outcomeCallID)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let outcome = """
+        {"version":1,"call_id":"\(outcomeCallID)","outcome":{"goal_result":"partial","reason":"кейс-задачу не успели","summary":"кандидат сильный","decisions":["дойти до кейса во второй встрече"],"next_steps":["отправить тестовое"],"open_questions":[],"assessment":[{"criterion":"системность","verdict":"да","evidence":"разложил задачу по шагам"}]},"usage":{},"cost_total_usd":0.012}
+        """
+        try? Data(outcome.utf8).write(to: dir.appendingPathComponent("outcome.json"))
+        try? """
+        # Итоги: Интервью — Иван Петров, senior BA
+        Звонок \(outcomeCallID) · 2026-09-04T15:30:05+03:00 · результат по цели: частично
+
+        кейс-задачу не успели
+
+        ## Кратко
+        кандидат сильный
+
+        ## Решения
+        - дойти до кейса во второй встрече
+
+        ## Следующие шаги
+        - отправить тестовое
+
+        ## Оценка по критериям
+        | критерий | вердикт | основание |
+        | --- | --- | --- |
+        | системность | да | разложил задачу по шагам |
+        """.write(to: dir.appendingPathComponent("outcome.md"), atomically: true, encoding: .utf8)
+    }
+
+    /// Окно компактной панели — вне главного, снимаем его contentView (§4.6 [предложено]).
+    /// Сильная ссылка: слабая умирает до захвата, и кадр берётся из главного окна.
+    static func compactWindow() -> NSWindow {
+        if let existing = _compactWindow { return existing }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 460),
+                              styleMask: [.titled, .closable, .utilityWindow],
+                              backing: .buffered, defer: false)
+        window.title = "Суфлёр"
+        _compactWindow = window
+        return window
+    }
+
+    private static var _compactWindow: NSWindow?
 }
 
 extension AppSection {
