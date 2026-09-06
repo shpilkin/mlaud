@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-from . import spkid
+from . import channels, spkid
 
 CHANNELS = ("phone", "vks", "other")
 
@@ -344,6 +344,12 @@ def cmd_prepare(args, ctx: Context) -> int:
             print(f"нет файла: {audio}", file=sys.stderr)
             code = 2
             continue
+        if channels.find_sidecar(audio) is not None:
+            # Звонок подписан по каналам (ADR-026): диаризация заменила бы «Я/Собеседник» на «Спикер N».
+            print(f"{audio.name}: запись звонка с сайдкаром каналов — переразметка голосов "
+                  f"не применяется", file=sys.stderr)
+            code = 2
+            continue
         if transcriber is None:
             from .transcribe import Transcriber
             transcriber = Transcriber(model_type=cfg.model_type)
@@ -352,9 +358,21 @@ def cmd_prepare(args, ctx: Context) -> int:
             diarizer = Diarizer(hf_token=cfg.hf_token or None, device=cfg.diarize_device or None)
         base = audio.stem
         # Транскрипт кладём туда, где он уже лежит: месяц старого прогона мог считаться
-        # от mtime, а он с тех пор поменялся (перенос, iCloud).
+        # от mtime, а он с тех пор поменялся (перенос, iCloud). Одно имя в двух месяцах —
+        # берём месяц самого аудио, а не первый по алфавиту.
+        own = _period_of(audio)
         existing = sorted(cfg.output.glob(f"*/{base}.txt"))
-        period = existing[0].parent.name if existing else _period_of(audio)
+        same = [p for p in existing if p.parent.name == own]
+        if same or not existing:
+            period = own
+        elif len(existing) == 1:
+            period = existing[0].parent.name
+        else:
+            months = ", ".join(p.parent.name for p in existing)
+            print(f"транскрипт «{base}» есть в месяцах {months}, а в месяце аудио {own} — нет: "
+                  f"не знаю, какой перезаписывать", file=sys.stderr)
+            code = 2
+            continue
         result = analyze(audio, cfg, transcriber, diarizer, gallery)
         outputs = write_outputs(result.segments, cfg.output / period, base)
         sidecar = spk.write(cfg, audio, period=period, base=base, outputs=outputs,

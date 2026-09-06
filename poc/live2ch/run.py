@@ -14,7 +14,13 @@ stdin), потребитель разбирает JSON, декодирует bas
     PYTHONPATH=worker worker/.venv/bin/python poc/live2ch/run.py select
     PYTHONPATH=worker worker/.venv/bin/python poc/live2ch/run.py run --name base --cadence fixed --window 18
     PYTHONPATH=worker worker/.venv/bin/python poc/live2ch/run.py report
-Сырые данные — ~/ASR/spikes/live2ch/ (вне репозитория).
+    PYTHONPATH=worker worker/.venv/bin/python poc/live2ch/run.py run --name pipe --pipe
+Сырые данные — ~/ASR/spikes/live2ch/ (вне репозитория; переопределение LIVE2CH_OUT).
+
+Режим `--pipe` закрывает «пайп не измерен» (RESULT.md): те же строки уходят в
+`python -m mlaud_worker.dictate` через stdin, события читаются из stdout. Окно и каденс —
+как в бою (константы dictate.py), `--window`/`--cadence` не действуют; занятость декодера
+через пайп не видна, меряются задержки событий `phrase` по кадру, который их закрыл.
 """
 
 import argparse
@@ -22,7 +28,9 @@ import base64
 import json
 import os
 import queue
+import shlex
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -35,7 +43,7 @@ from mlaud_worker import dictate
 SR = dictate.SR
 CHUNK_SEC = 0.1                      # как приходят буферы захвата (~0.1 с)
 CHUNK = int(CHUNK_SEC * SR)
-OUT = Path.home() / "ASR/spikes/live2ch"
+OUT = Path(os.environ.get("LIVE2CH_OUT") or Path.home() / "ASR/spikes/live2ch")
 ARCHIVE = Path.home() / "ASR/Processed/AllRecords"
 
 # Две разные записи: разные люди, разная манера. «Я» и «собеседник» здесь условны —
@@ -184,10 +192,10 @@ class Producer(threading.Thread):
                 time.sleep(deadline - now)
             produced = time.perf_counter()
             for ch in self.channels:
-                self.q.put((self.lines[ch][i], produced, ch, bool(self.speech[ch][i])))
+                self.q.put((self.lines[ch][i], produced, ch, bool(self.speech[ch][i]), i))
         for ch in self.channels:
-            self.q.put((json.dumps({"t": "flush", "ch": ch}), time.perf_counter(), ch, False))
-        self.q.put((json.dumps({"t": "quit"}), time.perf_counter(), None, False))
+            self.q.put((json.dumps({"t": "flush", "ch": ch}), time.perf_counter(), ch, False, None))
+        self.q.put((json.dumps({"t": "quit"}), time.perf_counter(), None, False, None))
 
 
 def run(name: str, cadence: str, window: float, channels: list[str], minutes: float,
@@ -230,7 +238,7 @@ def run(name: str, cadence: str, window: float, channels: list[str], minutes: fl
     producer.start()
     started = producer.started_at or time.perf_counter()
     while True:
-        line, produced, ch, has_speech = q.get()
+        line, produced, ch, has_speech, _ = q.get()
         now = time.perf_counter()
         msg = json.loads(line)
         if msg.get("t") == "quit":
@@ -260,6 +268,93 @@ def run(name: str, cadence: str, window: float, channels: list[str], minutes: fl
     return summary
 
 
+def run_pipe(name: str, channels: list[str], minutes: float, model_type: str,
+             worker_cmd: list[str] | None = None) -> dict:
+    """Тот же продюсер, но потребитель — настоящий `python -m mlaud_worker.dictate` за пайпом.
+
+    Отставание по кадрам изнутри процесса не видно, поэтому меряем задержку события
+    `phrase` от кадра, который его закрыл: индекс кадра восстанавливается из `t1`
+    (кадры ровно по 0.1 с принятого звука — так `dictate.py` и считает `t1`).
+    """
+    OUT.mkdir(parents=True, exist_ok=True)
+    segments = {ch: np.load(OUT / f"seg_{ch}.npy") for ch in channels}
+    limit = int(minutes * 60 * SR)
+    segments = {ch: seg[:limit] for ch, seg in segments.items()}
+
+    cmd = worker_cmd or [sys.executable, "-m", "mlaud_worker.dictate"]
+    t0 = time.perf_counter()
+    child = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                             encoding="utf-8", bufsize=1,
+                             env={**os.environ, "MLAUD_MODEL": model_type})
+    first = json.loads(child.stdout.readline())
+    if first.get("t") != "ready":
+        child.kill()
+        raise RuntimeError(f"распознаватель не поднялся: {first}")
+    load_sec = time.perf_counter() - t0
+
+    incoming: list[tuple[dict, float]] = []
+
+    def reader():
+        for line in child.stdout:
+            incoming.append((json.loads(line), time.perf_counter()))
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+
+    def send(line: str) -> None:
+        child.stdin.write(line + "\n")
+        child.stdin.flush()
+
+    for ch in channels:
+        send(json.dumps({"t": "open", "ch": ch, "label": ch}))
+
+    q: queue.Queue = queue.Queue()
+    producer = Producer(q, segments, channels)
+    produced_at: dict[str, dict[int, float]] = {ch: {} for ch in channels}
+
+    producer.start()
+    started = producer.started_at or time.perf_counter()
+    while True:
+        line, produced, ch, has_speech, i = q.get()
+        msg = json.loads(line)
+        if msg.get("t") == "quit":
+            break
+        if i is not None:
+            produced_at[ch][i] = produced
+        send(line)
+    for ch in channels:
+        send(json.dumps({"t": "close", "ch": ch}))
+    send(json.dumps({"t": "quit"}))
+    child.stdin.close()
+    child.wait(timeout=120)
+    reader_thread.join(timeout=10)
+    wall = time.perf_counter() - started
+
+    events: list[dict] = []
+    with open(OUT / f"{name}.events.jsonl", "w") as raw:
+        for ev, at in incoming:
+            ev["at"] = round(at - started, 3)
+            if ev["t"] == "phrase" and ev.get("ch") in produced_at:
+                idx = int(round(ev["t1"] / CHUNK_SEC)) - 1
+                closing = produced_at[ev["ch"]].get(idx)
+                if closing is not None:
+                    ev["processing_latency"] = round(at - closing, 3)
+                speech = producer.speech[ev["ch"]]
+                spoken = [j for j in range(min(idx, speech.size - 1), -1, -1) if speech[j]]
+                if ev["reason"] == "silence" and spoken and spoken[0] in produced_at[ev["ch"]]:
+                    ev["perceived_latency"] = round(at - produced_at[ev["ch"]][spoken[0]], 3)
+            events.append(ev)
+            raw.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+    summary = summarize(name, "fixed", dictate.MAX_WINDOW_SEC, channels, minutes, load_sec,
+                        wall, [], [], events)
+    summary["pipe"] = True
+    summary["worker_exit_code"] = child.returncode
+    (OUT / f"{name}.summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return summary
+
+
 def pct(values, p):
     if not values:
         return None
@@ -274,7 +369,7 @@ def summarize(name, cadence, window, channels, minutes, load_sec, wall, lags, de
     tail = lag_values[-len(channels) * 50:] if lag_values else []   # последние 5 с
     per_ch = {}
     for ch in channels:
-        stats = [e for e in events if e["t"] == "stat" and e["ch"] == ch]
+        stats = [e for e in events if e["t"] in ("stat", "phrase") and e["ch"] == ch]
         sil = [e for e in stats if e["reason"] == "silence"]
         per_ch[ch] = {
             "phrases": len(stats),
@@ -300,13 +395,17 @@ def summarize(name, cadence, window, channels, minutes, load_sec, wall, lags, de
         "name": name, "cadence": cadence, "window_sec": window, "channels": channels,
         "minutes": minutes, "model_load_sec": round(load_sec, 2), "wall_sec": round(wall, 1),
         "decodes": len(decodes), "decode_busy_sec": round(busy, 1),
-        "decode_busy_fraction": round(busy / wall, 3) if wall else None,
+        "decode_busy_fraction": round(busy / wall, 3) if wall and decodes else None,
         "lag_p50": pct(lag_values, 50), "lag_p95": pct(lag_values, 95), "lag_max": pct(lag_values, 100),
         "lag_over_1s_fraction": round(over1 / len(lag_values), 4) if lag_values else None,
         "lag_final_mean": round(statistics.mean(tail), 3) if tail else None,
         "decode_by_window": decode_by_window,
         "per_channel": per_ch,
     }
+
+
+def _pct_cell(v, digits=0) -> str:
+    return "—" if v is None else f"{v:.{digits}%}"
 
 
 def report() -> str:
@@ -322,8 +421,8 @@ def report() -> str:
         pv = "; ".join(f"{ch}: {c['perceived_latency_p50']}/{c['perceived_latency_p95']}"
                        for ch, c in r["per_channel"].items())
         lines.append(f"| {r['name']} | {r['cadence']} | {r['window_sec']} | {len(r['channels'])} | "
-                     f"{r['decode_busy_fraction']:.0%} | {r['lag_p50']} / {r['lag_p95']} / {r['lag_max']} | "
-                     f"{r['lag_over_1s_fraction']:.1%} | {r['lag_final_mean']} | {ph} | {pl} | {pv} |")
+                     f"{_pct_cell(r['decode_busy_fraction'])} | {r['lag_p50']} / {r['lag_p95']} / {r['lag_max']} | "
+                     f"{_pct_cell(r['lag_over_1s_fraction'], 1)} | {r['lag_final_mean']} | {ph} | {pl} | {pv} |")
     text = "\n".join(lines)
     print(text)
     return text
@@ -340,10 +439,15 @@ def main():
     r.add_argument("--channels", default="me,them")
     r.add_argument("--minutes", type=float, default=5)
     r.add_argument("--model", default=os.environ.get("MLAUD_MODEL") or "rnnt")
+    r.add_argument("--pipe", action="store_true", help="через stdin/stdout python -m mlaud_worker.dictate")
+    r.add_argument("--worker-cmd", default=None, help="команда распознавателя для --pipe (по умолчанию модуль dictate)")
     sub.add_parser("report")
     a = ap.parse_args()
     if a.cmd == "select":
         select_segments(a.minutes)
+    elif a.cmd == "run" and a.pipe:
+        run_pipe(a.name, a.channels.split(","), a.minutes, a.model,
+                 shlex.split(a.worker_cmd) if a.worker_cmd else None)
     elif a.cmd == "run":
         run(a.name, a.cadence, a.window, a.channels.split(","), a.minutes, a.model)
     else:

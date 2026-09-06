@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import CoreAudio
 import Foundation
 import MLaudCore
 
@@ -798,9 +799,16 @@ test("SpeakerSidecarStore: новые сверху, битые пропуска�
     try put("2026-08", "older", sidecarJSON, at: "2026-08-28T14:11:34+00:00")
     try put("2026-09", "newer", sidecarJSON, at: "2026-09-03T16:03:08+00:00")
     try put("2026-09", "broken", "{не json", at: "")
+    try put("2026-07", "stone", sidecarJSON.replacingOccurrences(of: "{", with: "{\"removed\": \"swept\",", options: [], range: sidecarJSON.range(of: "{")), at: "2026-07-01T10:00:00+00:00")
     let store = SpeakerSidecarStore(root: root)
     let recent = store.recent()
-    eq(recent.map { $0.sidecar.base }, ["rec", "rec"], "две записи, битая пропущена")
+    eq(recent.map { $0.sidecar.base }, ["rec", "rec"], "две записи, битая пропущена, надгробие тоже")
+    let all = store.recent(includeRemoved: true)
+    eq(all.count, 3, "с надгробием — три")
+    let stone = all.first { $0.sidecar.isRemoved }!
+    eq(stone.sidecar.removed, "swept", "причина из файла")
+    eq(stone.sidecar.pendingCount, 0, "у надгробия к разметке ноль")
+    check(!stone.sidecar.clusters.isEmpty, "имена кластеров у надгробия остались")
     eq(recent.map { $0.url.deletingLastPathComponent().lastPathComponent }, ["newer", "older"], "новые сверху")
     eq(store.pendingCount(), 2, "по одному с записи")
     eq(recent[0].clipURLs(for: recent[0].sidecar.clusters[0]).map(\.lastPathComponent),
@@ -849,6 +857,10 @@ test("RecordingIndex: сайдкары, старые записи без .meta.j
     try put(sep, ".DS_Store")
     let aug = root.appendingPathComponent("2026-08")
     try put(aug, "2026-08-20_10-00-00_Запись 7.txt")
+    try put(speakers.appendingPathComponent("2026-08/2026-08-20_10-00-00_Запись 7"), "speakers.json",
+            sidecarJSON.replacingOccurrences(of: "{", with: "{\"removed\": \"forgotten\",", options: [], range: sidecarJSON.range(of: "{"))
+                .replacingOccurrences(of: "\"base\": \"rec\", \"period\": \"2026-09\"",
+                                      with: "\"base\": \"2026-08-20_10-00-00_Запись 7\", \"period\": \"2026-08\""))
     let old = root.appendingPathComponent("2026-07")
     try put(old, "Старая запись.txt")
     try put(old, "Старая запись.srt")
@@ -856,6 +868,14 @@ test("RecordingIndex: сайдкары, старые записи без .meta.j
     try fm.setAttributes([.modificationDate: mtime], ofItemAtPath: old.appendingPathComponent("Старая запись.txt").path)
     try put(root, "не каталог.txt")
     try put(speakers.appendingPathComponent("2026-09/rec"), "speakers.json", sidecarJSON)
+    let archive = tmp.appendingPathComponent("Processed/AllRecords")
+    try put(archive.appendingPathComponent("2026-07"), "Старая запись.m4a")
+    try put(archive.appendingPathComponent("2026-07"), "Старая запись.txt")   // не аудио — не в счёт
+    try put(archive.appendingPathComponent("2026-08"), "другая.m4a")
+    // Запись звонка: аудио и сайдкар каналов в архиве, разметки голосов нет.
+    try put(archive.appendingPathComponent("2026-09"), "2026-09-03_21-43-04_Запись 15.m4a")
+    try put(archive.appendingPathComponent("2026-09"), "2026-09-03_21-43-04_Запись 15.channels.json",
+            #"{"version":1,"call_id":"2026-09-03_21-43-04","channels":{"0":"Я","1":"Иван Петров"}}"#)
 
     let recs = RecordingIndex(root: root, speakersRoot: speakers).scan()
     // «битый» без годного сайдкара датируется созданием файла — то есть «сейчас»,
@@ -881,6 +901,8 @@ test("RecordingIndex: сайдкары, старые записи без .meta.j
 
     let named = recs[3]
     check(named.dateIsExact && named.durationSec == nil, "дата из имени файла — точная, длительности нет")
+    check(named.hasSidecar && !named.needsLabeling, "надгробие сайдкара: сайдкар есть, к разметке ничего")
+    eq(named.speakers, ["я", "Дина П(?)", "Спикер 4"], "имена говорящих из надгробия остались")
     var stamp = DateComponents(); stamp.year = 2026; stamp.month = 8; stamp.day = 20; stamp.hour = 10
     eq(named.date, Calendar.current.date(from: stamp), "2026-08-20 10:00 по местному времени")
     check(RecordingIndex.dateFromName("2026-13-40_99-00-00_x") == nil, "мусорная дата в имени — nil")
@@ -889,7 +911,24 @@ test("RecordingIndex: сайдкары, старые записи без .meta.j
     let legacy = recs[4]
     check(!legacy.dateIsExact, "без сайдкара дата не точная")
     eq(legacy.date, mtime, "дата — mtime транскрипта")
-    check(legacy.durationSec == nil && legacy.srt != nil && legacy.audio == nil, "без длительности и аудио, srt есть")
+    check(legacy.durationSec == nil && legacy.srt != nil && legacy.audio == nil, "без архива: без длительности и аудио, srt есть")
+    check(!legacy.hasSidecar && rec.hasSidecar && !full.hasSidecar, "сайдкар есть только у rec")
+
+    // С архивом аудио: у записи без .meta.json аудио — файл с тем же именем в месяце архива.
+    let withArchive = RecordingIndex(root: root, speakersRoot: speakers, archiveRoot: archive).scan()
+    let legacy2 = withArchive.first { $0.base == "Старая запись" }!
+    eq(legacy2.audio?.resolvingSymlinksInPath().path,
+       archive.appendingPathComponent("2026-07/Старая запись.m4a").resolvingSymlinksInPath().path, "аудио из архива по имени")
+    check(withArchive.first { $0.base == "2026-08-20_10-00-00_Запись 7" }!.audio == nil, "чужое имя в месяце архива не подходит")
+    eq(withArchive.first { $0.base == "rec" }!.audio, nil, "у rec .meta.json без audio_path и аудио в архиве нет")
+    let call = withArchive.first { $0.base == "2026-09-03_21-43-04_Запись 15" }!
+    check(call.isCall && !call.hasSidecar, "звонок: сайдкар каналов есть, разметки голосов нет")
+    eq(call.speakers, ["Я", "Иван Петров"], "имена говорящих звонка — из сайдкара каналов")
+    check(!recs.first { $0.base == "2026-09-03_21-43-04_Запись 15" }!.isCall, "без архива признак звонка не читается")
+    let candidates = RecordingIndex.labelingCandidates(withArchive)
+    eq(candidates.ready.map(\.base), ["Старая запись"], "разметить заново можно тех, у кого нашёлся файл; звонок — нет")
+    eq(candidates.noAudio.map(\.base), ["битый"],
+       "без сайдкара и без файла: битый сайдкар; Запись 15 — звонок, rec с сайдкаром и Запись 7 с надгробием не в списке")
 
     let groups = RecordingIndex.grouped(recs)
     eq(groups.map(\.period), ["2026-09", "2026-08", "2026-07"], "периоды в порядке записей")
@@ -1092,6 +1131,516 @@ test("VoicesPresentation: строки вкладки «Люди»") {
     eq(listing.people.map(\.id), ["Милана Г", "я"], "человек идентифицируется именем")
 }
 
+// MARK: - Этап 3, волна 0: общие типы звонка
+
+test("JSONText: числа не больше двух знаков, хвостовые нули срезаны") {
+    eq(JSONText.number(183.2), "183.2", "183.2")
+    eq(JSONText.number(190.0), "190", "190.0 → 190")
+    eq(JSONText.number(0.049), "0.05", "0.049 → 0.05")
+    eq(JSONText.number(-0.0), "0", "-0.0 → 0")
+    eq(JSONText.number(0), "0", "0")
+    eq(JSONText.number(7.4), "7.4", "7.4")
+    eq(JSONText.number(612.4), "612.4", "612.4")
+    eq(JSONText.number(0.3 + 0.6), "0.9", "0.9 без хвоста двоичной дроби")
+    eq(JSONText.number(-1.5), "-1.5", "отрицательное")
+    eq(JSONText.number(1234567.891), "1234567.89", "два знака")
+}
+
+test("JSONText: строки экранируются, кириллица как есть") {
+    eq(JSONText.quoted("Собеседник"), "\"Собеседник\"", "кириллица как есть")
+    eq(JSONText.quoted("a\"b\\c"), #""a\"b\\c""#, "кавычка и слэш")
+    eq(JSONText.quoted("x\ny\r\tz"), #""x\ny\r\tz""#, "переводы строк и табуляция")
+    eq(JSONText.quoted("\u{01}"), #""\u0001""#, "управляющий символ")
+    eq(JSONText.quoted(""), "\"\"", "пустая")
+}
+
+test("ChannelsSidecar: байты примера §3.1 с брифом и без") {
+    let plain = ChannelsSidecar(callID: "2026-09-04_15-30-05", themLabel: "Собеседник")
+    eq(String(decoding: plain.encoded(), as: UTF8.self),
+       #"{"version":1,"call_id":"2026-09-04_15-30-05","channels":{"0":"Я","1":"Собеседник"}}"# + "\n",
+       "без брифа — ключ опущен")
+    let withBrief = ChannelsSidecar(callID: "2026-09-04_15-30-05", themLabel: "Иван Петров", brief: "тема: «бюджет»")
+    eq(String(decoding: withBrief.encoded(), as: UTF8.self),
+       #"{"version":1,"call_id":"2026-09-04_15-30-05","channels":{"0":"Я","1":"Иван Петров"},"brief":"тема: «бюджет»"}"# + "\n",
+       "с брифом")
+    eq(ChannelsSidecar.fileName(callID: "2026-09-04_15-30-05"), "2026-09-04_15-30-05.channels.json", "имя файла")
+    eq(withBrief.label(.me), "Я", "метка me")
+    eq(withBrief.label(.them), "Иван Петров", "метка them")
+    eq(CallChannel.me.key, "0", "ключ me")
+    eq(CallChannel.them.key, "1", "ключ them")
+}
+
+test("ChannelsSidecar: круговой decode и отказ на чужой версии") {
+    let original = ChannelsSidecar(callID: "2026-09-04_15-30-05", themLabel: "Иван Петров", brief: "б")
+    eq(try ChannelsSidecar.decode(original.encoded()), original, "с брифом")
+    let plain = ChannelsSidecar(callID: "2026-09-04_15-30-05", themLabel: "Собеседник")
+    eq(try ChannelsSidecar.decode(plain.encoded()), plain, "без брифа")
+    let v2 = Data(#"{"version":2,"call_id":"x","channels":{"0":"Я","1":"С"}}"#.utf8)
+    check((try? ChannelsSidecar.decode(v2)) == nil, "version 2 отвергнут")
+    let noThem = Data(#"{"version":1,"call_id":"x","channels":{"0":"Я"}}"#.utf8)
+    check((try? ChannelsSidecar.decode(noThem)) == nil, "без канала 1 отвергнут")
+    let notString = Data(#"{"version":1,"call_id":"x","channels":{"0":"Я","1":5}}"#.utf8)
+    check((try? ChannelsSidecar.decode(notString)) == nil, "метка не строка — отвергнут")
+    check((try? ChannelsSidecar.decode(Data("мусор".utf8))) == nil, "не JSON — отвергнут")
+}
+
+test("ChannelsSidecar: имя собеседника — до первой запятой") {
+    eq(ChannelsSidecar.themLabel(counterpart: "Иван Петров, кандидат"), "Иван Петров", "до запятой")
+    eq(ChannelsSidecar.themLabel(counterpart: "Иван Петров"), "Иван Петров", "без запятой")
+    eq(ChannelsSidecar.themLabel(counterpart: ""), "Собеседник", "пусто")
+    eq(ChannelsSidecar.themLabel(counterpart: "  , x"), "Собеседник", "пробелы до запятой")
+    eq(ChannelsSidecar.themLabel(counterpart: nil), "Собеседник", "nil")
+}
+
+test("ChannelsSidecar: call_id из даты в зоне +3 и обратно") {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 3 * 3600)!
+    let date = Date(timeIntervalSince1970: 1_788_525_005)   // 2026-09-04T12:30:05Z
+    eq(ChannelsSidecar.callID(startedAt: date, calendar: calendar), "2026-09-04_15-30-05", "в зоне +3")
+    eq(ChannelsSidecar.startedAt(callID: "2026-09-04_15-30-05", calendar: calendar), date, "обратно")
+    check(ChannelsSidecar.startedAt(callID: "мусор", calendar: calendar) == nil, "мусор → nil")
+}
+
+test("ChannelCommand: пять строк протокола байт в байт") {
+    eq(ChannelCommand.open(ch: "them", label: "Собеседник").line(),
+       #"{"t":"open","ch":"them","label":"Собеседник"}"#, "open")
+    eq(ChannelCommand.audio(ch: "them", pcm: Data([0x01, 0x02])).line(),
+       #"{"t":"audio","ch":"them","pcm":"AQI="}"#, "audio")
+    eq(ChannelCommand.flush(ch: "them").line(), #"{"t":"flush","ch":"them"}"#, "flush")
+    eq(ChannelCommand.reset(ch: "them").line(), #"{"t":"reset","ch":"them"}"#, "reset")
+    eq(ChannelCommand.close(ch: "them").line(), #"{"t":"close","ch":"them"}"#, "close")
+    eq(ChannelCommand.open(ch: "me", label: "Иван \"Ваня\"\nПетров").line(),
+       #"{"t":"open","ch":"me","label":"Иван \"Ваня\"\nПетров"}"#, "метка с кавычкой и переводом строки")
+    eq(String(decoding: ChannelCommand.close(ch: "me").data(), as: UTF8.self),
+       #"{"t":"close","ch":"me"}"# + "\n", "data — строка с переводом строки")
+}
+
+test("RecognizerEvent: с ch — событие канала, без — диктовки") {
+    eq(RecognizerEvent.parse(line: #"{"t":"commit","ch":"them","phrase":12,"text":"да"}"#),
+       .channel(ch: "them", .commit(phrase: 12, text: "да")), "commit")
+    eq(RecognizerEvent.parse(line: #"{"t":"preview","ch":"me","phrase":3,"text":"ну"}"#),
+       .channel(ch: "me", .preview(phrase: 3, text: "ну")), "preview")
+    eq(RecognizerEvent.parse(line: #"{"t":"phrase","ch":"them","phrase":12,"t0":183.2,"t1":190.6,"text":"вся фраза","reason":"silence","window_sec":7.4,"decodes":18}"#),
+       .channel(ch: "them", .phrase(ChannelPhrase(phrase: 12, t0: 183.2, t1: 190.6, text: "вся фраза",
+                                                  reason: "silence", windowSec: 7.4, decodes: 18))), "phrase")
+    eq(RecognizerEvent.parse(line: #"{"t":"phrase","ch":"them","phrase":1,"t0":0,"t1":5,"text":"","reason":"flush","window_sec":5,"decodes":2}"#),
+       .channel(ch: "them", .phrase(ChannelPhrase(phrase: 1, t0: 0, t1: 5, text: "",
+                                                  reason: "flush", windowSec: 5, decodes: 2))), "phrase с целыми числами")
+    eq(RecognizerEvent.parse(line: #"{"t":"error","ch":"main","message":"канал main зарезервирован"}"#),
+       .channel(ch: "main", .error("канал main зарезервирован")), "error с ch")
+    eq(RecognizerEvent.parse(line: #"{"t":"ready"}"#), .dictation(.ready), "ready — диктовка")
+    eq(RecognizerEvent.parse(line: #"{"t":"stat","reason":"manual","window_sec":2.5,"decodes":4}"#),
+       .dictation(.stat(reason: "manual", windowSec: 2.5, decodes: 4)), "stat без ch — диктовка")
+    eq(RecognizerEvent.parse(line: #"{"t":"commit","text":"привет"}"#), .dictation(.commit("привет")), "commit без ch — диктовка")
+    check(RecognizerEvent.parse(line: #"{"t":"phrase"}"#) == nil, "phrase без ch — nil")
+    check(RecognizerEvent.parse(line: #"{"t":"stat","ch":"them"}"#) == nil, "stat с ch — nil")
+    check(RecognizerEvent.parse(line: "UserWarning: torchaudio deprecated") == nil, "не JSON — nil")
+}
+
+// MARK: - Этап 3, Swift Core: машина звонка, лента, форматы, звук
+
+func pcm16(_ samples: [Int16]) -> Data {
+    var out = Data(capacity: samples.count * 2)
+    for s in samples {
+        let v = UInt16(bitPattern: s)
+        out.append(UInt8(v & 0xFF)); out.append(UInt8(v >> 8))
+    }
+    return out
+}
+
+func samples16(_ data: Data) -> [Int16] {
+    stride(from: 0, to: data.count - 1, by: 2).map {
+        Int16(bitPattern: UInt16(data[data.startIndex + $0]) | (UInt16(data[data.startIndex + $0 + 1]) << 8))
+    }
+}
+
+test("CallSession: полный путь idle→ready→running→finishing→done→idle") {
+    var clock = Date(timeIntervalSince1970: 1_788_525_005)
+    let session = CallSession(now: { clock })
+    var changes = 0
+    session.onChange = { _ in changes += 1 }
+    eq(session.snapshot.phase, .idle, "старт — idle")
+    session.apply(.start)
+    session.apply(.stop)
+    eq(session.snapshot.phase, .idle, "start/stop из idle игнорируются")
+    eq(changes, 0, "игнорированные переходы не дёргают onChange")
+
+    session.apply(.prepare(callID: "черновик", title: "Звонок"))
+    eq(session.snapshot.phase, .ready, "prepare → ready")
+    session.apply(.stop)
+    eq(session.snapshot.phase, .ready, "stop из ready игнорируется")
+    session.apply(.start)
+    eq(session.snapshot.phase, .ready, "start без микрофона игнорируется")
+    session.apply(.checklist(microphone: .ok, appAudio: .needsRestart))
+    session.apply(.devices(input: "MacBook Pro Microphone", output: "AirPods Pro", app: "zoom.us"))
+    session.apply(.headphones(true))
+    session.apply(.channel(.them, .noAudio("приложение закрыто")))
+    check(session.snapshot.canStart, "микрофон ok — можно стартовать, звук приложения не обязателен")
+    session.apply(.prepare(callID: "2026-09-04_15-30-05", title: "Звонок"))
+    eq(session.snapshot.phase, .ready, "prepare в ready остаётся ready")
+    eq(session.snapshot.microphone, .ok, "prepare в ready не сбрасывает чек-лист")
+    eq(session.snapshot.callID, "2026-09-04_15-30-05", "callID обновлён")
+
+    session.apply(.start)
+    eq(session.snapshot.phase, .running, "start → running")
+    eq(session.snapshot.startedAt, clock, "startedAt по подставным часам")
+    eq(session.snapshot.them, .noAudio("приложение закрыто"), "деградация канала сохранена")
+    session.apply(.dismiss)
+    eq(session.snapshot.phase, .running, "dismiss из running игнорируется")
+    session.apply(.failed("распознаватель упал"))
+    eq(session.snapshot.phase, .running, "failed в running оставляет фазу")
+    eq(session.snapshot.error, "распознаватель упал", "ошибка записана")
+    session.apply(.recognizer(.restarting(attempt: 1)))
+    session.apply(.level(.me, 0.4))
+    session.apply(.recorded(12.5))
+    let line = TranscriptLine(id: 1, ch: .me, label: "Я", t0: 0, t1: 1, text: "да")
+    session.apply(.transcript(lines: [line], tails: [.them: "ну"]))
+    eq(session.snapshot.levels.me, 0.4, "уровень")
+    eq(session.snapshot.recordedSec, 12.5, "записано")
+    eq(session.snapshot.lines, [line], "строки")
+    eq(session.snapshot.tails[.them], "ну", "хвост")
+
+    clock = clock.addingTimeInterval(1); session.apply(.tick)
+    clock = clock.addingTimeInterval(1); session.apply(.tick)
+    clock = clock.addingTimeInterval(1); session.apply(.tick)
+    eq(session.snapshot.elapsed, 3, "три тика по секунде")
+
+    session.apply(.finalized(URL(fileURLWithPath: "/x.m4a")))
+    eq(session.snapshot.phase, .running, "finalized из running игнорируется")
+    session.apply(.stop)
+    eq(session.snapshot.phase, .finishing, "stop → finishing")
+    clock = clock.addingTimeInterval(5); session.apply(.tick)
+    eq(session.snapshot.elapsed, 3, "после stop таймер стоит")
+    let result = URL(fileURLWithPath: "/inbox/2026-09-04_15-30-05.m4a")
+    session.apply(.finalized(result))
+    eq(session.snapshot.phase, .done, "finalized → done")
+    eq(session.snapshot.result, result, "результат")
+    session.apply(.dismiss)
+    eq(session.snapshot, CallSnapshot(), "dismiss → чистый снимок")
+    check(changes > 0, "onChange звался")
+}
+
+test("CallSession: failed в finishing — done с ошибкой; dismiss из ready") {
+    let session = CallSession(now: { Date(timeIntervalSince1970: 0) })
+    session.apply(.prepare(callID: "a", title: "Звонок"))
+    session.apply(.checklist(microphone: .ok, appAudio: .ok))
+    session.apply(.start)
+    session.apply(.stop)
+    session.apply(.failed("afconvert: код 1"))
+    eq(session.snapshot.phase, .done, "ошибка конвертации завершает звонок")
+    eq(session.snapshot.error, "afconvert: код 1", "текст ошибки")
+    check(session.snapshot.result == nil, "результата нет")
+    session.apply(.dismiss)
+    eq(session.snapshot.phase, .idle, "dismiss из done")
+    session.apply(.prepare(callID: "b", title: "Звонок"))
+    session.apply(.dismiss)
+    eq(session.snapshot.phase, .idle, "dismiss из ready")
+}
+
+test("LiveTranscript: строка §3.3 байт в байт") {
+    eq(LiveTranscript.encodeLine(ch: .them, label: "Иван Петров", t0: 183.2, t1: 190.6, text: "да, слушаю"),
+       #"{"ch":"them","label":"Иван Петров","t0":183.2,"t1":190.6,"text":"да, слушаю"}"#, "дроби")
+    eq(LiveTranscript.encodeLine(ch: .me, label: "Я", t0: 190.0, t1: 195.0, text: "ок"),
+       #"{"ch":"me","label":"Я","t0":190,"t1":195,"text":"ок"}"#, "целые без .0")
+}
+
+test("LiveTranscript: порядок по t0, хвосты, offset, id, файл") {
+    let tmp = try makeTempDir()
+    let file = tmp.appendingPathComponent("calls/2026-09-04_15-30-05/transcript.live.jsonl")
+    let t = LiveTranscript(labels: [.me: "Я", .them: "Иван Петров"], fileURL: file)
+    var changes = 0
+    t.onChange = { changes += 1 }
+    t.open(.me, offset: 0)
+    t.open(.them, offset: 0)
+    func phrase(_ n: Int, _ t0: Double, _ t1: Double, _ text: String) -> ChannelEvent {
+        .phrase(ChannelPhrase(phrase: n, t0: t0, t1: t1, text: text, reason: "silence", windowSec: t1 - t0, decodes: 3))
+    }
+
+    t.apply(.them, .commit(phrase: 1, text: "Добрый"))
+    t.apply(.them, .commit(phrase: 1, text: "день"))
+    t.apply(.them, .preview(phrase: 1, text: "Иван"))
+    eq(t.tails[.them], "Добрый день Иван", "хвост = коммиты через TextJoiner + preview")
+    t.apply(.them, .commit(phrase: 1, text: ","))
+    eq(t.tails[.them], "Добрый день, Иван", "знак препинания без пробела")
+    t.apply(.them, .preview(phrase: 1, text: ""))
+    eq(t.tails[.them], "Добрый день,", "пустой preview — только коммиты")
+
+    t.apply(.them, phrase(1, 5.0, 9.5, "Добрый день, Иван"))
+    check(t.tails[.them] == nil, "хвост очищен фразой")
+    t.apply(.me, phrase(1, 3.2, 4.0, "Алло"))
+    eq(t.lines.map(\.text), ["Алло", "Добрый день, Иван"], "me с t0=3.2 встал раньше them с t0=5.0")
+    eq(t.lines.map(\.id), [2, 1], "id — порядок прихода")
+    eq(t.lines[1].label, "Иван Петров", "метка канала")
+
+    t.apply(.me, phrase(2, 5.0, 6.0, "Ага"))
+    eq(t.lines.map(\.text), ["Алло", "Добрый день, Иван", "Ага"], "равный t0 — после существующих")
+    t.apply(.me, phrase(3, 7.0, 7.5, ""))
+    eq(t.lines.count, 3, "пустой текст не добавляется")
+
+    // Перезапуск распознавателя: them открыт заново с offset 42 с (672 000 сэмплов уже в записи).
+    t.apply(.them, .commit(phrase: 2, text: "хвост до перезапуска"))
+    t.open(.them, offset: 42)
+    check(t.tails[.them] == nil, "open очищает хвост")
+    t.apply(.them, phrase(1, 0, 2.5, "после перезапуска"))
+    let restarted = t.lines.last!
+    eq(restarted.t0, 42, "t0 = offset + 0")
+    eq(restarted.t1, 44.5, "t1 = offset + 2.5")
+    eq(restarted.id, 4, "id монотонный при повторе (them, 1)")
+    eq(Set(t.lines.map(\.id)).count, t.lines.count, "id уникальны")
+    check(changes >= 10, "onChange звался на каждое событие")
+
+    let text = try String(contentsOf: file, encoding: .utf8)
+    let rows = text.split(separator: "\n", omittingEmptySubsequences: false)
+    eq(rows.count, 5, "ровно 4 строки + перевод строки в конце")
+    eq(String(rows[0]), #"{"ch":"them","label":"Иван Петров","t0":5,"t1":9.5,"text":"Добрый день, Иван"}"#, "первая строка — порядок прихода")
+    eq(String(rows[3]), #"{"ch":"them","label":"Иван Петров","t0":42,"t1":44.5,"text":"после перезапуска"}"#, "смещение в файле")
+
+    let noFile = LiveTranscript(labels: [:], fileURL: nil)
+    noFile.apply(.me, phrase(1, 0, 1, "без файла"))
+    eq(noFile.lines.first?.label, "Я", "без метки — метка по умолчанию")
+}
+
+let callRecordExample = """
+{
+  "version": 1,
+  "call_id": "2026-09-04_15-30-05",
+  "started_at": "2026-09-04T15:30:05+03:00",
+  "ended_at": "2026-09-04T15:40:17+03:00",
+  "duration_sec": 612.4,
+  "mode": "vks",
+  "brief": null,
+  "devices": {
+    "input": "MacBook Pro Microphone",
+    "output": "AirPods Pro",
+    "app": {"name": "zoom.us", "bundle_id": "us.zoom.xos", "pid": 4242}
+  },
+  "model": "rnnt",
+  "channels": {"0": "Я", "1": "Собеседник"},
+  "recording": "2026-09-04_15-30-05.m4a",
+  "meeting_id": null
+}
+
+"""
+
+func exampleCallRecord() -> CallRecord {
+    var r = CallRecord(callID: "2026-09-04_15-30-05", startedAt: Date(timeIntervalSince1970: 1_788_525_005),
+                       model: "rnnt", channels: ["0": "Я", "1": "Собеседник"])
+    r.endedAt = Date(timeIntervalSince1970: 1_788_525_617)
+    r.durationSec = 612.4
+    r.inputDevice = "MacBook Pro Microphone"
+    r.outputDevice = "AirPods Pro"
+    r.app = CallRecord.App(name: "zoom.us", bundleID: "us.zoom.xos", pid: 4242)
+    r.recording = "2026-09-04_15-30-05.m4a"
+    return r
+}
+
+test("CallRecord: байты примера §3.2 в зоне +3 и круговой decode") {
+    let plus3 = TimeZone(secondsFromGMT: 3 * 3600)!
+    let record = exampleCallRecord()
+    eq(String(decoding: record.encoded(timeZone: plus3), as: UTF8.self), callRecordExample, "пример байт в байт")
+    eq(try CallRecord.decode(record.encoded(timeZone: plus3)), record, "круговой decode")
+    eq(try CallRecord.decode(record.encoded(timeZone: TimeZone(secondsFromGMT: 0)!)), record, "смещение +00:00 читается")
+
+    var fresh = CallRecord(callID: "2026-09-04_15-30-05", startedAt: Date(timeIntervalSince1970: 1_788_525_005),
+                           model: "rnnt", channels: ["0": "Я", "1": "Собеседник"])
+    fresh.brief = "тема"
+    let text = String(decoding: fresh.encoded(timeZone: plus3), as: UTF8.self)
+    check(text.contains("  \"ended_at\": null,\n  \"duration_sec\": null,\n"), "до «Стоп» — null")
+    check(text.contains("    \"app\": null\n"), "без звука приложения — null")
+    check(text.contains("  \"brief\": \"тема\",\n"), "бриф")
+    check(text.contains("  \"recording\": null,\n  \"meeting_id\": null\n}\n"), "хвост")
+    eq(try CallRecord.decode(fresh.encoded(timeZone: plus3)), fresh, "круговой decode без необязательных полей")
+
+    let unknown = Data(callRecordExample.replacingOccurrences(of: "\"meeting_id\": null", with: "\"meeting_id\": \"044d\",\n  \"cost\": 1.5").utf8)
+    eq(try CallRecord.decode(unknown).meetingID, "044d", "неизвестные ключи игнорируются")
+    check((try? CallRecord.decode(Data(callRecordExample.replacingOccurrences(of: "\"version\": 1", with: "\"version\": 2").utf8))) == nil, "version 2 отвергнут")
+    check((try? CallRecord.decode(Data("мусор".utf8))) == nil, "не JSON — отвергнут")
+}
+
+test("CallStore: write/read/list и meeting_id из .meta.json") {
+    let tmp = try makeTempDir()
+    let root = tmp.appendingPathComponent("calls")
+    eq(CallStore.defaultRoot(home: URL(fileURLWithPath: "/Users/x")).path, "/Users/x/ASR/Prompter/calls", "корень по умолчанию")
+    eq(CallStore.folder(root: root, callID: "a").lastPathComponent, "a", "папка звонка")
+    eq(CallStore.list(root: root).count, 0, "нет корня — пусто")
+
+    let older = exampleCallRecord()
+    var newer = CallRecord(callID: "2026-09-05_10-00-00", startedAt: Date(timeIntervalSince1970: 1_788_591_600),
+                           model: "rnnt", channels: ["0": "Я", "1": "Собеседник"])
+    newer.meetingID = "уже"
+    let oldest = CallRecord(callID: "2026-08-01_09-00-00", startedAt: Date(timeIntervalSince1970: 1_785_567_600),
+                            model: "rnnt", channels: ["0": "Я", "1": "Собеседник"])
+    try CallStore.write(older, root: root)
+    try CallStore.write(newer, root: root)
+    try CallStore.write(oldest, root: root)
+    try "x".write(to: root.appendingPathComponent("мусор.txt"), atomically: true, encoding: .utf8)
+    let files = try FileManager.default.contentsOfDirectory(atPath: CallStore.folder(root: root, callID: older.callID).path)
+    eq(files, ["call.json"], "временный файл не остался")
+    eq(CallStore.read(root: root, callID: older.callID), older, "read")
+    check(CallStore.read(root: root, callID: "нет") == nil, "read несуществующего — nil")
+    eq(CallStore.list(root: root).map(\.callID), [newer.callID, older.callID, oldest.callID], "по startedAt убыв.")
+
+    var changed = older
+    changed.recording = nil
+    try CallStore.write(changed, root: root)
+    eq(CallStore.read(root: root, callID: older.callID), changed, "перезапись поверх")
+
+    let output = tmp.appendingPathComponent("AllOutputs")
+    let sep = output.appendingPathComponent("2026-09")
+    try FileManager.default.createDirectory(at: sep, withIntermediateDirectories: true)
+    try #"{"meeting_id": "044d", "source": "mlaud"}"#.write(to: sep.appendingPathComponent("2026-09-04_15-30-05.meta.json"), atomically: true, encoding: .utf8)
+    try #"{"source": "mlaud"}"#.write(to: sep.appendingPathComponent("2026-09-05_10-00-00.meta.json"), atomically: true, encoding: .utf8)
+    eq(CallStore.reconcileMeetingIDs(root: root, outputRoot: output), [older.callID], "дописан только тот, у кого появился meeting_id")
+    eq(CallStore.read(root: root, callID: older.callID)?.meetingID, "044d", "meeting_id в call.json")
+    eq(CallStore.read(root: root, callID: newer.callID)?.meetingID, "уже", "существующий не тронут")
+    check(CallStore.read(root: root, callID: oldest.callID)?.meetingID == nil, "без .meta.json — нет")
+    eq(CallStore.reconcileMeetingIDs(root: root, outputRoot: output), [], "повторный прогон ничего не меняет")
+}
+
+test("AudioPCM: int16, моно из плоскостей, interleave, rms") {
+    let frames = [Float](repeating: 0.25, count: 320)
+    eq(AudioPCM.int16(fromFloat: frames).count, 640, "320 кадров → 640 байт")
+    eq(samples16(AudioPCM.int16(fromFloat: [1.5, -1.5, 0.5, 0, -0.5])), [32767, -32768, 16384, 0, -16384], "clamp и масштаб")
+    eq(samples16(AudioPCM.int16(fromFloat: [.nan, .infinity, -.infinity])), [0, 32767, -32768], "NaN → 0, ±inf зажимаются, без падения")
+    let nanPlane: [Float] = [.nan, 0.5]
+    eq(samples16(nanPlane.withUnsafeBufferPointer { AudioPCM.monoInt16(planes: [$0], frames: 2) }), [0, 16384], "NaN в плоскости SCK → 0")
+    let a: [Float] = [0.5, 0.5, 1.0]
+    let b: [Float] = [-0.5, 0.5, 0.0]
+    let mono = a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in AudioPCM.monoInt16(planes: [pa, pb], frames: 3) } }
+    eq(samples16(mono), [0, 16384, 16384], "среднее по плоскостям")
+    let inter: [Float] = [0.5, -0.5, 0.25, 0.25]
+    eq(samples16(inter.withUnsafeBufferPointer { AudioPCM.monoInt16(interleaved: $0, channels: 2) }), [0, 8192], "среднее по interleaved")
+    eq(samples16(AudioPCM.interleave(left: pcm16([1, 2]), right: pcm16([3, 4]))), [1, 3, 2, 4], "interleave")
+    eq(AudioPCM.rms(int16: Data()), 0, "пусто → 0")
+    let amp: Float = 0.5
+    let sine = (0..<16000).map { amp * sin(2 * .pi * 440 * Float($0) / 16000) }
+    let rms = AudioPCM.rms(int16: AudioPCM.int16(fromFloat: sine))
+    check(abs(rms - 0.7071 * amp) < 0.005, "rms синуса ≈ 0.707·A, получили \(rms)")
+    check(abs(AudioPCM.rms(int16: pcm16([32767, -32768])) - 1) < 1e-4, "полная шкала → ≈1")
+}
+
+test("CallTracks: выравнивание по времени звонка, пары кадров, добивка") {
+    let tracks = CallTracks()
+    let chunk = pcm16([Int16](repeating: 7, count: 1600))   // 0.1 с
+    let first = tracks.align(.them, pcm: chunk, at: 1.0)
+    eq(first.count, 16000 * 2 + chunk.count, "первый кусок them в 1.0 с — 16000 нулей спереди")
+    check(samples16(first.prefix(32000)).allSatisfy { $0 == 0 }, "спереди тишина")
+    eq(samples16(first).last, 7, "звук на месте")
+    eq(tracks.align(.them, pcm: chunk, at: 1.15).count, chunk.count, "в пределах tolerance ничего не вставляется")
+
+    var me = Data()
+    for i in 0..<20 { me = tracks.align(.me, pcm: chunk, at: Double(i + 1) * 0.1) }   // me до 2.0 с
+    eq(me.count, chunk.count, "поток без дыр не дополняется")
+    let afterHole = tracks.align(.me, pcm: chunk, at: 4.0)
+    eq(afterHole.count, 32000 * 2 + chunk.count, "дыра 2 с после пересборки микрофона — 2 с нулей")
+
+    let t2 = CallTracks()
+    eq(t2.push(.me, pcm: pcm16([1, 2, 3])).count, 0, "без them кадров нет")
+    eq(samples16(t2.push(.them, pcm: pcm16([10, 20]))), [1, 10, 2, 20], "пары, сколько есть в обеих очередях")
+    eq(t2.samples(.me), 3, "отдано в push")
+    eq(t2.samples(.them), 2, "отдано в push")
+    eq(samples16(t2.push(.me, pcm: pcm16([4]))), [], "them пуст — ждём")
+    eq(samples16(t2.finish()), [3, 0, 4, 0], "finish добивает короткую дорожку нулями")
+    eq(t2.finish().count, 0, "повторный finish пуст")
+}
+
+test("CallTracks.catchUp: замершая дорожка добивается тишиной по тику, без двойной заливки") {
+    let tracks = CallTracks()
+    let chunk = pcm16([Int16](repeating: 7, count: 1600))   // 0.1 с
+    eq(tracks.catchUp(.them, to: 0.3).count, 0, "раньше tolerance — нечего добивать")
+    var drained = 0
+    for i in 0..<10 {   // me идёт 0.1…1.0 с, them молчит
+        drained += tracks.push(.me, pcm: tracks.align(.me, pcm: chunk, at: Double(i + 1) * 0.1)).count
+    }
+    eq(drained, 0, "без them ничего не слито")
+    eq(tracks.catchUp(.me, to: 1.0).count, 0, "живая дорожка не трогается")
+    let fill = tracks.catchUp(.them, to: 1.0)
+    eq(fill.count, 8000 * 2, "them отстал на 1.0 с — нули до elapsed − tolerance")
+    check(samples16(fill).allSatisfy { $0 == 0 }, "заливка — тишина")
+    eq(tracks.push(.them, pcm: fill).count, 8000 * 4, "после заливки слито 0.5 с стерео")
+    eq(tracks.samples(.them), 8000, "заливка учтена в samples — offset для open согласован")
+    eq(tracks.catchUp(.them, to: 1.0).count, 0, "повторный catchUp в тот же момент пуст")
+    let resumed = tracks.align(.them, pcm: chunk, at: 1.05)
+    eq(resumed.count, 8800 * 2 + chunk.count, "звук вернулся: дозаливка только 0.55 с, не 1.05 — голова уже сдвинута")
+    eq(tracks.push(.them, pcm: resumed).count, 8000 * 4, "слито ровно то, что накопил me (0.5 с)")
+    eq(tracks.finish().count, (8800 + 1600 - 8000) * 4, "finish добивает только хвост them, а не весь звонок")
+}
+
+test("AppAudioPolicy: таблица решений") {
+    eq(AppAudioPolicy.classify(errorCode: -3801), .needsRestart, "−3801 — перезапуск")
+    eq(AppAudioPolicy.classify(errorCode: -3802), .other(-3802), "иное — other")
+    eq(AppAudioPolicy.afterOutputChange(lastBufferAge: nil), .restart, "буферов не было — restart")
+    eq(AppAudioPolicy.afterOutputChange(lastBufferAge: 3), .restart, "встали дольше 2 с — restart")
+    eq(AppAudioPolicy.afterOutputChange(lastBufferAge: 0.5), .keep, "идут — keep")
+    eq(AppAudioPolicy.afterOutputChange(lastBufferAge: 5, stallTimeout: 10), .keep, "порог настраиваемый")
+    eq(AppAudioPolicy.health(rms: 0.1, silentFor: 0), .flowing, "звук есть")
+    eq(AppAudioPolicy.health(rms: 0.001, silentFor: 5), .flowing, "тихо, но недолго")
+    eq(AppAudioPolicy.health(rms: 0.001, silentFor: 12), .silent(since: 12), "тихо дольше 10 с")
+    eq(AppAudioPolicy.health(rms: 0.1, silentFor: 12), .flowing, "звук вернулся — flowing")
+}
+
+test("OutputDevice: эвристика динамиков и опрос CoreAudio без падения") {
+    let builtIn = UInt32(kAudioDeviceTransportTypeBuiltIn)
+    check(OutputDevice.isLikelySpeakers(transport: builtIn, dataSource: "Internal Speakers"), "встроенные динамики")
+    check(!OutputDevice.isLikelySpeakers(transport: builtIn, dataSource: "Headphones"), "наушники в разъёме")
+    check(!OutputDevice.isLikelySpeakers(transport: builtIn, dataSource: "Наушники"), "локализованный источник")
+    check(!OutputDevice.isLikelySpeakers(transport: UInt32(kAudioDeviceTransportTypeBluetooth), dataSource: nil), "bluetooth — не динамики")
+    check(!OutputDevice.isLikelySpeakers(transport: nil, dataSource: nil), "неизвестный транспорт — не пугаем")
+    check(OutputDevice.isLikelySpeakers(transport: builtIn, dataSource: nil), "встроенный без источника — динамики")
+    guard let device = OutputDevice.defaultDevice() else {
+        check(false, "устройство вывода по умолчанию не определилось"); return
+    }
+    let name = OutputDevice.name(device)
+    check(!name.isEmpty && !name.hasPrefix("устройство "), "имя настоящее: \(name)")
+    let transport = OutputDevice.transportType(device)
+    let source = OutputDevice.dataSourceName(device)
+    check(transport != nil, "транспорт читается")
+    print("    (текущий вывод: \(name), транспорт \(transport ?? 0), источник \(source ?? "—"), динамики: \(OutputDevice.likelySpeakers()))")
+    let watch = OutputDeviceWatch(onChange: {})
+    watch.start(); watch.stop(); watch.stop()
+}
+
+test("RecordingIndex: имена говорящих звонка — из channels.json архива (D14)") {
+    let tmp = try makeTempDir()
+    let root = tmp.appendingPathComponent("AllOutputs")
+    let archive = tmp.appendingPathComponent("Processed/AllRecords")
+    let speakers = tmp.appendingPathComponent("speakers")
+    let fm = FileManager.default
+    func put(_ dir: URL, _ name: String, _ text: String = "x") throws {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try text.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    let sep = root.appendingPathComponent("2026-09")
+    try put(sep, "2026-09-04_15-30-05.txt")
+    try put(sep, "rec.txt")
+    try put(sep, "битый.txt")
+    let arch = archive.appendingPathComponent("2026-09")
+    try put(arch, "2026-09-04_15-30-05.m4a")
+    try put(arch, "2026-09-04_15-30-05.channels.json",
+            String(decoding: ChannelsSidecar(callID: "2026-09-04_15-30-05", themLabel: "Иван Петров").encoded(), as: UTF8.self))
+    try put(arch, "rec.m4a")
+    try put(arch, "rec.channels.json",
+            String(decoding: ChannelsSidecar(callID: "rec", themLabel: "Собеседник").encoded(), as: UTF8.self))
+    try put(arch, "битый.channels.json", "{не json")
+    try put(speakers.appendingPathComponent("2026-09/rec"), "speakers.json", sidecarJSON)
+
+    let recs = RecordingIndex(root: root, speakersRoot: speakers, archiveRoot: archive).scan()
+    let call = recs.first { $0.base == "2026-09-04_15-30-05" }!
+    eq(call.speakers, ["Я", "Иван Петров"], "метки каналов вместо разметки")
+    check(!call.needsLabeling, "разметка не нужна")
+    check(!call.hasSidecar, "сайдкара разметки голосов нет")
+    check(call.audio != nil, "аудио из архива")
+    let rec = recs.first { $0.base == "rec" }!
+    eq(rec.speakers, ["я", "Дина П(?)", "Спикер 4"], "speakers.json важнее channels.json")
+    check(rec.hasSidecar, "сайдкар разметки есть")
+    let broken = recs.first { $0.base == "битый" }!
+    eq(broken.speakers, [], "битый channels.json — как без него")
+    let withoutArchive = RecordingIndex(root: root, speakersRoot: speakers).scan()
+    eq(withoutArchive.first { $0.base == "2026-09-04_15-30-05" }!.speakers, [], "без archiveRoot channels.json не читается")
+}
+
 removeTestDefaults()
+runCallRecorderTests()
+runPrompterTests()
 print("\n==== Swift tests: \(passed) passed, \(failed) failed ====")
 exit(failed == 0 ? 0 : 1)

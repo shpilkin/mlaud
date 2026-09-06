@@ -1,5 +1,6 @@
 """Сайдкар записи для разметки голосов: сборка, клипы, смысл полей, переподпись, ретенция."""
 
+import json
 import os
 import time
 
@@ -189,22 +190,30 @@ def test_rewrite_lines_longest_name_first():
     assert out[2] == "A: два" and changed == 1
 
 
-def test_sweep_removes_old_recordings(tmp_path):
+def test_sweep_tombstones_old_recordings(tmp_path):
     cfg = make_cfg(tmp_path)
     old = spk.sidecar_dir(cfg, "2026-07", "old")
     fresh = spk.sidecar_dir(cfg, "2026-09", "fresh")
+    cluster = {"label": "SPEAKER_00", "display": "Спикер 1", "speech_sec": 40.0, "written": "Ося",
+               "assigned": "Ося", "embedding": [1.0, 0.0], "clips": ["clips/SPEAKER_00_0.wav"]}
     for d in (old, fresh):
         d.mkdir(parents=True)
-        (d / spk.FILE_NAME).write_text("{}", "utf-8")
+        (d / spk.FILE_NAME).write_text(json.dumps({"min_speech": 30.0, "clusters": [cluster]}), "utf-8")
         (d / "clips").mkdir()
     long_ago = time.time() - spk.DEFAULT_MAX_AGE - 60
     os.utime(old / spk.FILE_NAME, (long_ago, long_ago))
 
     removed = spk.sweep(cfg)
     assert removed == [old]
-    assert not old.exists() and not old.parent.exists()   # пустой месяц тоже убран
-    assert fresh.exists()
-    assert spk.sweep(cfg) == []
+    # Надгробие: файл остался с именами, клипы и вектор стёрты, в списке живых его нет.
+    stone = spk.load(old / spk.FILE_NAME)
+    assert stone["removed"] == "swept" and stone["removed_at"]
+    assert stone["clusters"][0]["assigned"] == "Ося"
+    assert stone["clusters"][0]["embedding"] is None and stone["clusters"][0]["clips"] == []
+    assert not (old / "clips").exists()
+    assert spk.pending_count(stone) == 0
+    assert fresh.exists() and (fresh / "clips").exists()
+    assert spk.sweep(cfg) == []                           # надгробие второй раз не трогается
     assert spk.list_sidecars(cfg) == [fresh / spk.FILE_NAME]
     assert spk.sweep(Config(inbox="i", output="o", processed="p", failed="f",
                             service=tmp_path / "nope")) == []
@@ -227,6 +236,10 @@ def test_forget_removes_recording_dir_only(tmp_path):
               turns=TURNS, centroids=CENTROIDS, names=NAMES, idents=IDENTS, segments=SEGMENTS)
     d = spk.sidecar_dir(cfg, "2026-09", "rec")
     removed = spk.forget(d)                              # каталог вместо файла тоже принимается
-    assert removed == d and not d.exists()
-    assert not d.parent.exists()                         # пустой месяц убран
+    assert removed == d and d.exists()                   # надгробие, а не пустое место
+    stone = spk.load(d / spk.FILE_NAME)
+    assert stone["removed"] == "forgotten"
+    assert all(c["embedding"] is None and c["clips"] == [] for c in stone["clusters"])
+    assert not (d / "clips").exists()
+    assert spk.pending_count(stone) == 0 and spk.list_sidecars(cfg) == []
     assert outputs["txt"].exists()                       # транскрипт на месте

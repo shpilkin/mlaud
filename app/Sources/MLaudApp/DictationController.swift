@@ -4,9 +4,8 @@ import MLaudCore
 /// Диктовка по горячей клавише: микрофон → резидентный распознаватель → печать
 /// в активное поле ввода чужого приложения.
 ///
-/// Процесс распознавателя резидентный, в отличие от пакетного worker'а: модель грузится
-/// 1.8 с и занимает ~1.6 ГБ, поэтому поднимать её на каждую фразу нельзя. По той же
-/// причине она не висит вечно — простаивающий процесс закрывается по таймеру.
+/// Процесс распознавателя общий со звонком и живёт в `RecognizerProcess`; здесь —
+/// только сеанс диктовки: разрешения, микрофон, сторож звука и печать.
 final class DictationController {
     enum State: Equatable {
         case off
@@ -34,29 +33,21 @@ final class DictationController {
     /// не показываем — оно перестраивалось бы четыре раза в секунду.
     private(set) var preview: String = ""
 
-    private let makeCommand: () -> WorkerCommand
+    private let process: RecognizerProcess
     private let inserter = TextInserter()
     private var joiner = TextJoiner()
     private var capture: AudioCapture?
-    private var process: Process?
-    private var stdinPipe: Pipe?
-    private var lineBuffer = LineBuffer()
-    private var idleTimer: Timer?
     private var watchdog: Timer?
     private var stalls = 0
 
-    /// Сколько процесс с моделью живёт без дела, прежде чем освободить память.
-    private let idleTimeout: TimeInterval = 300
     /// Столько тишины в приходе буферов считаем поломкой захвата. Не путать с тишиной
     /// в звуке: молчащий микрофон всё равно шлёт буферы, а сломанный тап не шлёт ничего.
     private let stallTimeout: TimeInterval = 4
     /// Ниже этой доли реального времени звук считаем негодным.
     private let minThroughput: Double = 0.5
 
-    private let ioQueue = DispatchQueue(label: "mlaud.dictation.io")
-
-    init(makeCommand: @escaping () -> WorkerCommand) {
-        self.makeCommand = makeCommand
+    init(process: RecognizerProcess) {
+        self.process = process
     }
 
     // MARK: - Управление
@@ -90,20 +81,19 @@ final class DictationController {
     }
 
     private func startSession() {
-        idleTimer?.invalidate()
         joiner.reset()
         preview = ""
-        if process?.isRunning == true {
+        // acquire при готовом процессе синхронно зовёт onState(.ready); гейт `state == .starting`
+        // его пропускает, и переход делается здесь по process.state — без двойного старта захвата.
+        process.acquire(.dictation, handlers: makeHandlers())
+        switch process.state {
+        case .ready:
             state = .listening
             startCapture()
-            return
-        }
-        state = .starting
-        do {
-            try launchRecognizer()
-        } catch {
-            state = .off
-            onError?("не удалось запустить распознаватель: \(error.localizedDescription)")
+        case .starting:
+            state = .starting
+        case .off:
+            break   // запуск не удался, onLaunchFailure уже отработал
         }
     }
 
@@ -114,55 +104,39 @@ final class DictationController {
         stalls = 0
         capture?.stop()
         capture = nil
-        send(.flush)
+        process.send(.flush)
         preview = ""
         state = .off
-        scheduleIdleShutdown()
+        process.release(.dictation)
     }
 
     // MARK: - Процесс распознавателя
 
-    private func launchRecognizer() throws {
-        let command = makeCommand()
-        let process = command.makeProcess()
-        let stdin = Pipe()
-        let stdout = Pipe()
-        process.standardInput = stdin
-        process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
-
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            self?.consume(data)
+    private func makeHandlers() -> RecognizerProcess.Handlers {
+        var handlers = RecognizerProcess.Handlers()
+        handlers.onState = { [weak self] processState in
+            guard let self, processState == .ready, self.state == .starting else { return }
+            self.state = .listening
+            self.startCapture()
         }
-        process.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async { self?.handleTermination() }
+        handlers.onDictationEvent = { [weak self] event in
+            self?.handle(event)
         }
-
-        try process.run()
-        self.process = process
-        self.stdinPipe = stdin
-    }
-
-    private func consume(_ data: Data) {
-        let lines = lineBuffer.append(data)
-        guard !lines.isEmpty else { return }
-        DispatchQueue.main.async { [weak self] in
+        handlers.onTerminated = { [weak self] unexpected in
+            self?.handleTermination(unexpected: unexpected)
+        }
+        handlers.onLaunchFailure = { [weak self] message in
             guard let self else { return }
-            for line in lines {
-                guard let event = DictationEvent.parse(line: line) else { continue }
-                self.handle(event)
-            }
+            self.state = .off
+            self.onError?("не удалось запустить распознаватель: \(message)")
         }
+        return handlers
     }
 
     private func handle(_ event: DictationEvent) {
         switch event {
         case .ready:
-            guard state == .starting else { return }
-            state = .listening
-            startCapture()
+            break   // приходит через onState
         case .commit(let text):
             let piece = joiner.next(text)
             if !piece.isEmpty { inserter.type(piece) }
@@ -175,27 +149,17 @@ final class DictationController {
         }
     }
 
-    private func handleTermination() {
-        process = nil
-        stdinPipe = nil
-        lineBuffer = LineBuffer()
+    private func handleTermination(unexpected: Bool) {
         watchdog?.invalidate()
         watchdog = nil
-        if state != .off {
-            capture?.stop()
-            capture = nil
-            state = .off
+        guard state != .off else { return }
+        capture?.stop()
+        capture = nil
+        preview = ""
+        state = .off
+        process.release(.dictation)
+        if unexpected {
             onError?("распознаватель завершился неожиданно")
-        }
-    }
-
-    private func send(_ command: DictationCommand) {
-        guard let handle = stdinPipe?.fileHandleForWriting else { return }
-        let payload = command.data()
-        ioQueue.async {
-            // Процесс мог умереть между проверкой и записью — SIGPIPE прилетает
-            // как исключение Objective-C, поэтому пишем через try?.
-            try? handle.write(contentsOf: payload)
         }
     }
 
@@ -203,7 +167,7 @@ final class DictationController {
 
     private func startCapture() {
         let capture = AudioCapture { [weak self] pcm in
-            self?.send(.audio(pcm))
+            self?.process.send(.audio(pcm))
         }
         capture.onDiagnostic = { DictationLog.write($0) }
         capture.onReconfigured = { DictationLog.write($0) }
@@ -221,6 +185,7 @@ final class DictationController {
             if let error {
                 self.capture = nil
                 self.state = .off
+                self.process.release(.dictation)
                 self.onError?(error.localizedDescription)
                 return
             }
@@ -282,38 +247,28 @@ final class DictationController {
         watchdog = nil
         capture?.stop()
         capture = nil
-        send(.reset)
+        process.send(.reset)
         preview = ""
         state = .off
         stalls = 0
-        scheduleIdleShutdown()
+        process.release(.dictation)
         onError?(message)
     }
 
-    // MARK: - Освобождение памяти
+    // MARK: - Освобождение
 
-    private func scheduleIdleShutdown() {
-        idleTimer?.invalidate()
-        idleTimer = Timer.scheduledTimer(withTimeInterval: idleTimeout, repeats: false) { [weak self] _ in
-            self?.shutdown()
-        }
-    }
-
+    /// Остановить захват и отпустить процесс; сам процесс не убивать — им может пользоваться звонок.
     func shutdown() {
-        idleTimer?.invalidate()
-        idleTimer = nil
         watchdog?.invalidate()
         watchdog = nil
         capture?.stop()
         capture = nil
-        guard let process, process.isRunning else {
-            self.process = nil
-            return
-        }
-        send(.quit)
-        ioQueue.asyncAfter(deadline: .now() + 1.0) {
-            if process.isRunning { process.terminate() }
-        }
+        // Недосказанная фраза осталась бы в окне тёплого процесса и попала бы в следующую диктовку.
+        if state == .listening { process.send(.reset) }
+        preview = ""
+        state = .off
+        stalls = 0
+        process.release(.dictation)
     }
 
     deinit { shutdown() }

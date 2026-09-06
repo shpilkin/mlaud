@@ -33,10 +33,11 @@ private struct VoicesBody: View {
             case .people: PeopleTab(voices: voices)
             }
         } trailing: {
-            Button("Обновить") { voices.reload() }
+            Button("Обновить") { voices.reload(); model.commands?.reloadRecordings() }
                 .buttonStyle(.niti)
         }
-        .onAppear { voices.reload() }
+        // reloadRecordings пересканирует индекс → счётчик «без сайдкара» на кнопке.
+        .onAppear { voices.reload(); model.commands?.reloadRecordings() }
         .onDisappear { voices.stopPlayback() }
     }
 
@@ -106,7 +107,7 @@ private struct LabelTab: View {
         } else if voices.recordings.isEmpty {
             NitiEmptyState(systemImage: "person.wave.2",
                            title: "Пока нечего размечать",
-                           message: "Карточки появляются у записей, обработанных с включённым «Подписывать известные голоса» (Настройки), и у старых записей — по кнопке «Разметить старую запись…».")
+                           message: "Карточки появляются у записей, обработанных с включённым «Подписывать известные голоса» (Настройки), и у старых записей — по кнопкам «Разметить старую запись…» и «Разметить всё без сайдкара».")
         } else {
             NitiEmptyState(systemImage: "arrow.left", title: "Выбери запись слева", message: "")
         }
@@ -152,17 +153,33 @@ private struct LabelTab: View {
     }
 
     private var footer: some View {
-        let busy = voices.busy
+        // Между файлами очереди busy на мгновение падает — кнопки держит isPreparing.
+        let busy = voices.busy || voices.isPreparing
         let hasSelection = voices.selected != nil
         return HStack(spacing: Niti.Spacing.s3) {
-            Button("Разметить старую запись…") { voices.prepareOld() }
-                .buttonStyle(.niti)
+            if voices.isPreparing {
+                Button("Остановить") { voices.cancelPrepare() }
+                    .buttonStyle(.niti)
+                    .disabled(voices.prepareProgress?.cancelled ?? true)
+                    .help("Текущая запись доработает до конца, остальные из очереди не пойдут.")
+            } else {
+                // Два «Разметить…» рядом обрезались до одинаковых подписей — одно меню.
+                FooterMenu(title: "Разметить заново") {
+                    Button("Старую запись из архива…") { voices.prepareOld() }
+                    Button("Всё без сайдкара (\(voices.readyCandidates.count))") { voices.prepareAllWithoutSidecar() }
+                        .disabled(voices.readyCandidates.isEmpty)
+                    if voices.noAudioCandidates.count > 0 {
+                        Divider()
+                        Text("Ещё \(voices.noAudioCandidates.count) без аудиофайла в архиве — их разметить нечем")
+                    }
+                }
                 .disabled(busy)
-                .help("Записи, обработанные до включения идентификации: транскрипт пересобирается с именами из базы, рядом появляется сайдкар с клипами.")
+                .help(bulkHelp)
+            }
             Button("Убрать из списка") { voices.forgetSelected() }
                 .buttonStyle(.niti)
                 .disabled(busy || !hasSelection)
-            if busy {
+            if voices.busy || voices.isPreparing {
                 ProgressView().controlSize(.small)
             }
             Text(voices.status)
@@ -171,7 +188,7 @@ private struct LabelTab: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer()
-            Button("Переподписать транскрипт") { voices.relabel() }
+            Button("Переподписать") { voices.relabel() }
                 .buttonStyle(.niti)
                 .disabled(busy || !hasSelection)
                 .help("Записать текущие имена в .txt и .srt на диске. После каждой разметки это делается само; кнопка — если файлы правили отдельно.")
@@ -180,6 +197,58 @@ private struct LabelTab: View {
                 .disabled(busy || (voices.selected?.sidecar.txt.isEmpty ?? true))
                 .help("Отправить .txt этой записи в Telegram ещё раз, уже с именами.")
         }
+    }
+
+    private var bulkHelp: String {
+        var text = "Все записи архива без сайдкара разметки — обработанные до включения "
+            + "идентификации (убранные из списка и старше 30 дней не в счёт). Каждая прогоняется "
+            + "через worker заново — транскрипт пересобирается с именами из базы и перезаписывается, "
+            + "рядом появляется сайдкар с клипами. Ошибки показываются одним окном в конце. "
+            + "В Telegram ничего не уходит."
+        let noAudio = voices.noAudioCandidates.count
+        if noAudio > 0 {
+            text += " Ещё \(noAudio) — без аудиофайла в архиве, их разметить нечем."
+        }
+        return text
+    }
+}
+
+/// Кнопка-меню в подвале: вид как у `.niti`-кнопки, стиль — снаружи `Menu`, иначе
+/// borderless-стиль его не рисует (как у выбора периода в «Записях»).
+private struct FooterMenu<Items: View>: View {
+    let title: String
+    @ViewBuilder let items: () -> Items
+    @State private var hovered = false
+
+    var body: some View {
+        Menu {
+            items()
+        } label: {
+            HStack(spacing: Niti.Spacing.s2) {
+                Text(title)
+                    .font(Niti.Typography.md)
+                    .fontWeight(Niti.Weight.medium)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Niti.Colors.muted)
+            }
+            .foregroundStyle(Niti.Colors.text)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .padding(.horizontal, Niti.Spacing.s4)
+        .frame(minHeight: Niti.Layout.minTapTarget)
+        .background(
+            RoundedRectangle(cornerRadius: Niti.Radius.pill, style: .continuous)
+                .fill(hovered ? Niti.Colors.hover : Niti.Colors.card)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Niti.Radius.pill, style: .continuous)
+                .strokeBorder(Niti.Colors.border, lineWidth: 1)
+        )
+        .onHover { hovered = $0 }
     }
 }
 
@@ -258,7 +327,7 @@ private struct ClusterCard: View {
                 }
             }
         }
-        .disabled(voices.busy)
+        .disabled(voices.busy || voices.isPreparing)
         .onAppear { name = assigned ?? "" }
         .onChange(of: cluster.assigned) { _, new in
             name = new ?? ""
@@ -461,7 +530,7 @@ private struct PeopleTab: View {
             Hint("Образцы — векторы голоса из размеченных записей, только на этом Mac. Удаление человека удаляет все его образцы. Клик по образцу открывает его кластер в разметке.")
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .disabled(voices.busy)
+        .disabled(voices.busy || voices.isPreparing)
     }
 }
 

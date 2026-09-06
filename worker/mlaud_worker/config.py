@@ -31,6 +31,8 @@ class Config:
     # ровно как раньше. Путь задаётся снаружи: у роутера каталог данных переопределяется
     # переменной окружения, поэтому хардкодить его нельзя.
     router_inbox: Path | None = None
+    # Папка Суфлёра: profile.md, templates/, briefs/, calls/ (feature-prompter.md §3.0); не iCloud.
+    prompter_dir: Path = field(default_factory=lambda: Path.home() / "ASR/Prompter")
 
     def __post_init__(self):
         self.inbox = Path(self.inbox)
@@ -39,6 +41,7 @@ class Config:
         self.failed = Path(self.failed)
         self.service = Path(self.service)
         self.voices_dir = Path(self.voices_dir)
+        self.prompter_dir = Path(self.prompter_dir)
         if self.router_inbox is not None:
             self.router_inbox = Path(self.router_inbox)
 

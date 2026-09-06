@@ -100,7 +100,16 @@ def needs_attention(cluster: dict, min_speech: float) -> bool:
     return not (m and m.get("sure"))
 
 
+def is_removed(sidecar: dict) -> bool:
+    """Надгробие: запись убрана из разметки («Убрать из списка») или её клипы и векторы
+    стёрла ретенция. Имена в кластерах остаются — по ним «Записи» показывают говорящих, а
+    «Разметить всё без сайдкара» такую запись кандидатом не считает."""
+    return bool(sidecar.get("removed"))
+
+
 def pending_count(sidecar: dict) -> int:
+    if is_removed(sidecar):
+        return 0
     return sum(1 for c in sidecar["clusters"] if needs_attention(c, sidecar["min_speech"]))
 
 
@@ -292,23 +301,33 @@ def relabel_transcript(sidecar_path: Path) -> dict:
     return {"changed": total, "files": files}
 
 
-def forget(sidecar_path: Path) -> Path:
-    """Убрать запись из разметки: каталог с сайдкаром, клипами и векторами удаляется.
+def tombstone(sidecar_path: Path, reason: str) -> Path:
+    """Клипы и векторы стереть, файл оставить с пометкой `removed`: сайдкар без биометрии.
     Транскрипт и уже сохранённые в базу образцы не трогаются."""
     path = resolve_path(sidecar_path)
     rec = path.parent
-    shutil.rmtree(rec, ignore_errors=True)
-    period = rec.parent
-    if period.exists() and not any(period.iterdir()):
-        period.rmdir()
+    sidecar = load(path)
+    shutil.rmtree(rec / "clips", ignore_errors=True)
+    for c in sidecar.get("clusters", []):
+        c["embedding"] = None
+        c["clips"] = []
+    sidecar["removed"] = reason
+    sidecar["removed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    save(path, sidecar)
     return rec
+
+
+def forget(sidecar_path: Path) -> Path:
+    """Убрать запись из разметки: остаётся надгробие (см. `tombstone`)."""
+    return tombstone(sidecar_path, "forgotten")
 
 
 # --- ретенция ---
 
 
 def sweep(cfg, max_age: float = DEFAULT_MAX_AGE, now: Optional[float] = None) -> list[Path]:
-    """Удалить каталоги записей старше `max_age` секунд (по mtime сайдкара)."""
+    """Записи старше `max_age` секунд (по mtime сайдкара) превратить в надгробия: клипы и
+    векторы стереть, имена оставить. Уже стёртые не трогаются."""
     base = root(cfg)
     if not base.exists():
         return []
@@ -321,18 +340,29 @@ def sweep(cfg, max_age: float = DEFAULT_MAX_AGE, now: Optional[float] = None) ->
             marker = rec / FILE_NAME
             if not rec.is_dir() or not marker.exists():
                 continue
-            if now - marker.stat().st_mtime > max_age:
-                shutil.rmtree(rec, ignore_errors=True)
-                removed.append(rec)
-        if not any(period.iterdir()):
-            period.rmdir()
+            if now - marker.stat().st_mtime <= max_age:
+                continue
+            try:
+                if is_removed(load(marker)):
+                    continue
+            except (OSError, ValueError):
+                continue
+            tombstone(marker, "swept")
+            removed.append(rec)
     return removed
 
 
 def list_sidecars(cfg) -> list[Path]:
-    """Все сайдкары, новые сверху."""
+    """Живые сайдкары (без надгробий), новые сверху."""
     base = root(cfg)
     if not base.exists():
         return []
-    found = list(base.glob(f"*/*/{FILE_NAME}"))
+    found = []
+    for p in base.glob(f"*/*/{FILE_NAME}"):
+        try:
+            if is_removed(load(p)):
+                continue
+        except (OSError, ValueError):
+            pass   # битый файл пусть увидит тот, кто читает
+        found.append(p)
     return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)

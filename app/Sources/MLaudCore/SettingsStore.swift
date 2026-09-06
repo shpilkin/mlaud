@@ -19,6 +19,13 @@ public final class SettingsStore {
         public static let dictationModifiers = "dictationModifiers"
         public static let identify = "identifyEnabled"
         public static let identifyPreset = "identifyPreset"
+        public static let callApp = "callAppBundleID"
+        public static let promptRPM = "promptRPM"
+        public static let promptCostCeiling = "promptCostCeilingUSD"
+        public static let materialsBudget = "materialsBudgetTokens"
+        public static let compactPanelAtStart = "compactPanelAtStart"
+        public static let llmConnections = "llmConnections"
+        public static let llmDefault = "llmDefaultConnection"
     }
 
     /// Порог узнавания голоса: три пресета из замера (ADR-016), а не сырое число.
@@ -146,6 +153,14 @@ public final class SettingsStore {
         set { defaults.set(newValue.rawValue, forKey: Key.identifyPreset) }
     }
 
+    /// Приложение звонка по умолчанию для Суфлёра; nil ↔ ключ отсутствует.
+    public var callAppBundleID: String? {
+        get { defaults.string(forKey: Key.callApp) }
+        set {
+            if let newValue { defaults.set(newValue, forKey: Key.callApp) } else { defaults.removeObject(forKey: Key.callApp) }
+        }
+    }
+
     /// Устройство для диаризации: 'mps' (быстро, Apple Silicon) или 'cpu'.
     public var diarizeDevice: String {
         get {
@@ -153,6 +168,37 @@ public final class SettingsStore {
             return Self.availableDevices.contains(v) ? v : Self.defaultDevice
         }
         set { defaults.set(newValue, forKey: Key.diarizeDevice) }
+    }
+
+    // MARK: суфлёр (этап 4, FR-12.14/12.5; в workerEnvironment не попадают никогда)
+
+    /// Запросов в минуту максимум.
+    public var promptRPM: Int {
+        get { max(1, defaults.integer(forKey: Key.promptRPM) == 0 ? 6 : defaults.integer(forKey: Key.promptRPM)) }
+        set { defaults.set(max(1, newValue), forKey: Key.promptRPM) }
+    }
+
+    /// Потолок стоимости за звонок, $; nil ↔ без потолка. По умолчанию 0.50 (RESULT:108-109 —
+    /// ограничивать надо задержку, а не расход); «без потолка» хранится как -1.
+    public var promptCostCeilingUSD: Double? {
+        get {
+            guard let raw = defaults.object(forKey: Key.promptCostCeiling) else { return 0.50 }
+            let v = (raw as? NSNumber)?.doubleValue ?? 0.50
+            return v < 0 ? nil : v
+        }
+        set { defaults.set(newValue ?? -1, forKey: Key.promptCostCeiling) }
+    }
+
+    /// Бюджет материалов, токенов (FP:146-147).
+    public var materialsBudgetTokens: Int {
+        get { defaults.object(forKey: Key.materialsBudget) == nil ? 120_000 : max(0, defaults.integer(forKey: Key.materialsBudget)) }
+        set { defaults.set(max(0, newValue), forKey: Key.materialsBudget) }
+    }
+
+    /// Компактная панель открывается автоматически при старте звонка (UX-OQ-7).
+    public var compactPanelAtStart: Bool {
+        get { defaults.bool(forKey: Key.compactPanelAtStart) }
+        set { defaults.set(newValue, forKey: Key.compactPanelAtStart) }
     }
 
     /// Переменные окружения для worker'а. Telegram-ключи добавляются только если заданы —

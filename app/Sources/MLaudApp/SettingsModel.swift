@@ -42,6 +42,23 @@ final class SettingsModel {
     var phoneSyncEnabled: Bool { didSet { store.phoneSyncEnabled = phoneSyncEnabled; onChange(.phoneSync) } }
     var identifyEnabled: Bool { didSet { store.identifyEnabled = identifyEnabled; onChange(.voices) } }
     var identifyPreset: SettingsStore.IdentifyPreset { didSet { store.identifyPreset = identifyPreset } }
+    var callAppBundleID: String? { didSet { store.callAppBundleID = callAppBundleID } }
+
+    // Суфлёр (этап 4, §1.7): зеркала без onChange — применяются при следующем звонке.
+    var promptRPM: Int { didSet { store.promptRPM = promptRPM } }
+    var promptCostCeilingUSD: Double? { didSet { store.promptCostCeilingUSD = promptCostCeilingUSD } }
+    var materialsBudgetTokens: Int { didSet { store.materialsBudgetTokens = materialsBudgetTokens } }
+    var compactPanelAtStart: Bool { didSet { store.compactPanelAtStart = compactPanelAtStart } }
+    var connections: [LLMConnection] = []
+    var defaultConnectionID: String?
+    /// Статус «ключ есть» и «Проверить» считает AppDelegate: и Keychain, и процесс — там.
+    var connectionHasKey: [String: Bool] = [:]
+    var connectionCheck: [String: ConnectionCheck] = [:]
+    var profileText: String = ""
+
+    enum ConnectionCheck: Equatable {
+        case idle, running, ok(ttftMs: Int), failed(String)
+    }
 
     /// Автозапуск живёт в системе (`SMAppService`), не в store: читается при показе экрана.
     private(set) var loginItemEnabled = false
@@ -64,6 +81,11 @@ final class SettingsModel {
         phoneSyncEnabled = store.phoneSyncEnabled
         identifyEnabled = store.identifyEnabled
         identifyPreset = store.identifyPreset
+        callAppBundleID = store.callAppBundleID
+        promptRPM = store.promptRPM
+        promptCostCeilingUSD = store.promptCostCeilingUSD
+        materialsBudgetTokens = store.materialsBudgetTokens
+        compactPanelAtStart = store.compactPanelAtStart
     }
 
     /// Диаризация включена, а токена HF нет — файлы пойдут без меток спикеров.

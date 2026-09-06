@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import MLaudCore
+import NitiUI
 import Observation
 
 /// Раздел главного окна. Порядок — порядок в сайдбаре и в ⌘1…⌘8.
@@ -83,6 +84,27 @@ final class AppModel {
     var voicesPending = 0
     let voices: VoicesModel
 
+    // Суфлёр: экран звонка, кандидаты на захват звука, список звонков
+    var call = CallSnapshot()
+    var callApps: [CallAppCandidate] = []
+    /// pid выбранного приложения звонка: в снимке только имя, а `Picker` привязывается к id.
+    var callAppPID: Int32?
+    var calls: [CallRecord] = []
+
+    // Суфлёр этапа 4: брифы, редактор, экран итогов, вкладка настроек (§1.7)
+    var briefs: [BriefSummary] = []
+    var templates: [String] = []
+    var editingBrief: Brief?
+    var editingBriefSlug: String?
+    var editingMaterials: MaterialsReport?
+    var settingsTab: SettingsScreen.Tab = .general
+    var prompterView: PrompterView = .list
+
+    /// Раздел «Суфлёр» вне звонка: список брифов/звонков, редактор брифа, итоги.
+    enum PrompterView: Equatable {
+        case list, editor, call, outcome(callID: String)
+    }
+
     var toast: String?
 
     let settings: SettingsModel
@@ -126,7 +148,13 @@ final class AppModel {
             }
         case .notifications:
             return unreadCount > 0 ? .badge(unreadCount) : .none
-        case .recordings, .prompter, .settings, .styleguide:
+        case .prompter:
+            switch call.phase {
+            case .running: return .text(NitiTimerLabel.clock(call.elapsed))
+            case .finishing: return .dot(.accent)
+            case .idle, .ready, .done: return .none
+            }
+        case .recordings, .settings, .styleguide:
             return .none
         }
     }

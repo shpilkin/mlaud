@@ -76,6 +76,8 @@ def build_config() -> Config:
         cfg.identify = _flag("MLAUD_IDENTIFY")
     if os.environ.get("MLAUD_VOICES_DIR"):
         cfg.voices_dir = os.environ["MLAUD_VOICES_DIR"]
+    if os.environ.get("MLAUD_PROMPTER_DIR"):
+        cfg.prompter_dir = os.environ["MLAUD_PROMPTER_DIR"]
     cfg.identify_threshold = _float_env("MLAUD_IDENTIFY_THRESHOLD", cfg.identify_threshold)
     cfg.identify_min_speech = _float_env("MLAUD_IDENTIFY_MIN_SPEECH", cfg.identify_min_speech)
     cfg.__post_init__()

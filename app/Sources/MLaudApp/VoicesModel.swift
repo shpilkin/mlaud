@@ -30,6 +30,14 @@ final class VoicesModel {
         let index: Int
     }
 
+    /// Ход подготовки записей из архива (`prepare`): по одному файлу на запуск worker'а.
+    struct PrepareProgress: Equatable {
+        var done: Int
+        var total: Int
+        var failed: Int
+        var cancelled: Bool
+    }
+
     private let store: SpeakerSidecarStore
     private let runner: VoicesRunner
     private let onChange: () -> Void
@@ -40,6 +48,16 @@ final class VoicesModel {
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()
+    }
+    /// Как спросить подтверждение: в приложении — модальное окно, в дымовой проверке — печать.
+    var confirm: (_ title: String, _ message: String, _ button: String) -> Bool = { title, message, button in
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Отмена")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     var tab: Tab = .label
@@ -55,9 +73,18 @@ final class VoicesModel {
     private(set) var playing: Playing?
     /// Кластер, к которому перешли из «Людей»: карточка подсвечена и прокручена в видимость.
     private(set) var highlighted: String?
+    /// Записи архива без сайдкара: `ready` — аудио на месте, `noAudio` — размечать нечем.
+    /// Владелец отдаёт их через `setArchive` после каждого скана индекса.
+    private(set) var readyCandidates: [Recording] = []
+    private(set) var noAudioCandidates: [Recording] = []
+    /// nil — подготовка не идёт.
+    private(set) var prepareProgress: PrepareProgress?
+    var isPreparing: Bool { prepareProgress != nil }
 
     private var prepareQueue: [URL] = []
-    private var prepareTotal = 0
+    /// Ошибки очереди: показываются одним окном в конце, а не модально на каждый файл —
+    /// иначе при системной ошибке N окон подряд и «Остановить» не нажать.
+    private var prepareFailures: [(base: String, message: String)] = []
     /// Куда перейти после подготовки записи из архива (образец без сайдкара).
     private var pendingReveal: (source: String, label: String)?
     private var player: AVAudioPlayer?
@@ -111,6 +138,13 @@ final class VoicesModel {
         guard rec.url != selectedURL else { return }
         stopPlayback()
         selectedURL = rec.url
+    }
+
+    /// Свежий скан архива транскриптов → кандидаты на разметку без сайдкара.
+    func setArchive(_ recordings: [Recording]) {
+        let candidates = RecordingIndex.labelingCandidates(recordings)
+        readyCandidates = candidates.ready
+        noAudioCandidates = candidates.noAudio
     }
 
     // MARK: - Карточки
@@ -170,27 +204,87 @@ final class VoicesModel {
         panel.allowedContentTypes = [.audio]
         panel.directoryURL = Self.archive
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        prepareQueue = panel.urls
-        prepareTotal = panel.urls.count
-        prepareNext()
+        startPrepare(panel.urls, select: true)
     }
 
-    private func prepareNext() {
-        guard !prepareQueue.isEmpty else { return }
+    /// Все записи архива без сайдкара — через тот же `prepare`, по файлу на запуск worker'а:
+    /// так виден ход и можно остановиться между файлами.
+    func prepareAllWithoutSidecar() {
+        guard !busy, !isPreparing, !readyCandidates.isEmpty else { return }
+        let n = readyCandidates.count
+        let title = "Разметить \(n) \(RussianPlural.form(n, "запись", "записи", "записей")) без сайдкара?"
+        let message = "Транскрипты будут сделаны заново с именами из текущей базы голосов и "
+            + "перезаписаны в папке результатов. В Telegram ничего не уходит.\n\n"
+            + "Это записи, обработанные до включения идентификации; убранные из списка и старше "
+            + "30 дней сюда не входят.\n\n"
+            + "Это примерно минута-две на запись, длинные — дольше; остальные действия в «Голосах» "
+            + "подождут до конца. Если конвейер прямо сейчас обрабатывает новую запись, модели "
+            + "загрузятся дважды."
+        guard confirm(title, message, "Разметить") else { return }
+        startPrepare(readyCandidates.compactMap(\.audio), select: false)
+    }
+
+    /// Очередь очищается, текущий файл дорабатывает до конца.
+    func cancelPrepare() {
+        guard var progress = prepareProgress, !progress.cancelled else { return }
+        prepareQueue.removeAll()
+        progress.cancelled = true
+        prepareProgress = progress
+        status = "Останавливаю после «\(currentPrepareBase)»…"
+    }
+
+    private var currentPrepareBase = ""
+
+    /// `select` — открыть подготовленную запись в списке (одиночная разметка); при массовой
+    /// прогонке выбор не прыгает.
+    private func startPrepare(_ urls: [URL], select: Bool) {
+        guard !urls.isEmpty else { return }
+        prepareQueue = urls
+        prepareFailures = []
+        prepareProgress = PrepareProgress(done: 0, total: urls.count, failed: 0, cancelled: false)
+        prepareNext(select: select)
+    }
+
+    private func prepareNext(select: Bool) {
+        guard var progress = prepareProgress else { return }
+        guard !prepareQueue.isEmpty else {
+            let done = progress.done - progress.failed
+            var line = "Размечено: \(done) из \(progress.total)"
+            if progress.failed > 0 { line += ", с ошибкой: \(progress.failed)" }
+            if progress.cancelled { line += ", остановлено" }
+            status = line
+            prepareProgress = nil
+            onChange()
+            // Одно окно на всю очередь, уже после снятия состояния подготовки.
+            if let last = prepareFailures.last {
+                let names = prepareFailures.map { "«\($0.base)»" }.joined(separator: ", ")
+                presentError("Не разметилось: \(names)\n\n\(last.message)")
+                prepareFailures = []
+            }
+            return
+        }
         let url = prepareQueue.removeFirst()
-        let n = prepareTotal - prepareQueue.count
-        status = "Обрабатываю «\(url.deletingPathExtension().lastPathComponent)» "
-            + "(\(n)/\(prepareTotal)) — минуту-две…"
-        run(["prepare", url.path]) { [weak self] ok in
+        let base = url.deletingPathExtension().lastPathComponent
+        currentPrepareBase = base
+        status = "Размечаю «\(base)» (\(progress.done + 1) из \(progress.total))…"
+        run(["prepare", url.path], presentErrors: false) { [weak self] result in
             guard let self else { return }
-            if ok, let rec = self.recordings.first(where: { $0.sidecar.source == url.lastPathComponent }) {
+            let ok = result.ok
+            progress = self.prepareProgress ?? progress   // отмена могла прийти во время работы
+            progress.done += 1
+            if !ok {
+                progress.failed += 1
+                self.prepareFailures.append((base, result.message))
+            }
+            self.prepareProgress = progress
+            if ok, select, let rec = self.recordings.first(where: { $0.sidecar.source == url.lastPathComponent }) {
                 self.selectedURL = rec.url
                 if let pending = self.pendingReveal, pending.source == url.lastPathComponent {
                     self.pendingReveal = nil
                     self.highlight(pending.label)
                 }
             }
-            self.prepareNext()
+            self.prepareNext(select: select)
         }
     }
 
@@ -232,7 +326,7 @@ final class VoicesModel {
             highlight(label)
             return true
         }
-        guard !busy else { return false }
+        guard !busy, !isPreparing else { return false }
         guard let audio = Self.findInArchive(source) else {
             let alert = NSAlert()
             alert.messageText = "Записи «\(source)» нет в архиве"
@@ -249,9 +343,7 @@ final class VoicesModel {
         guard alert.runModal() == .alertFirstButtonReturn else { return false }
         pendingReveal = (source, label)
         tab = .label
-        prepareQueue = [audio]
-        prepareTotal = 1
-        prepareNext()
+        startPrepare([audio], select: true)
         return true
     }
 
@@ -320,7 +412,9 @@ final class VoicesModel {
         return name.isEmpty ? nil : name
     }
 
-    private func run(_ args: [String], then: ((Bool) -> Void)? = nil) {
+    /// `presentErrors: false` — ошибку не показывать, а отдать в `then` (очередь копит их сама).
+    private func run(_ args: [String], presentErrors: Bool = true,
+                     then: ((VoicesRunner.Result) -> Void)? = nil) {
         guard !busy else { return }
         stopPlayback()
         busy = true
@@ -329,13 +423,13 @@ final class VoicesModel {
             self.busy = false
             if !result.ok {
                 self.status = ""
-                self.presentError(result.message)
+                if presentErrors { self.presentError(result.message) }
             } else if ["resend", "relabel", "prepare", "forget"].contains(args.first ?? "") {
                 self.status = result.stdout.split(separator: "\n").last.map(String.init) ?? ""
             }
             self.reload()
             self.onChange()
-            then?(result.ok)
+            then?(result)
         }
     }
 
@@ -354,7 +448,7 @@ final class VoicesModel {
     func smokeReport() -> String {
         "recordings=\(recordings.count) cards=\(visibleClusters.count) "
         + "people=\(listing?.people.count ?? -1) pending=\(selected?.sidecar.pendingCount ?? -1) "
-        + "busy=\(busy) tab=\(tab) highlighted=\(highlighted ?? "-") header=«\(header)»"
+        + "busy=\(busy) preparing=\(isPreparing) tab=\(tab) highlighted=\(highlighted ?? "-") header=«\(header)»"
     }
 }
 

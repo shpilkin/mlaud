@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import MLaudCore
+import NitiUI
 import UserNotifications
 
 /// Оболочка: строка меню, главное окно, процессы (worker, распознаватель, приём с iPhone),
@@ -39,7 +40,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var notifications = NotificationHistory(
         url: serviceDirectory.appendingPathComponent("notifications.json"))
     private lazy var phoneSync = PhoneSyncController(serviceDirectory: serviceDirectory)
+    /// Резидентный распознаватель, общий для диктовки и звонка. Замыкание держит значения,
+    /// а не AppDelegate: пути за время жизни приложения не меняются, а настройки живут в своём объекте.
+    private lazy var recognizer: RecognizerProcess = {
+        let python = self.pythonExecutable
+        let workerDir = self.workerDirectory
+        let extraPath = self.additionalPythonPath
+        let inbox = self.folderStore.inboxFolder ?? self.fm.homeDirectoryForCurrentUser
+        let store = self.settingsStore
+        return RecognizerProcess {
+            var env = store.workerEnvironment()
+            env["PYTHONUNBUFFERED"] = "1"  // события должны выходить сразу, а не пачкой
+            return WorkerCommand(
+                pythonExecutable: python,
+                workerDirectory: workerDir,
+                inboxFolder: inbox,
+                additionalPythonPath: extraPath,
+                extraEnvironment: env,
+                module: "mlaud_worker.dictate"
+            )
+        }
+    }()
     private var dictation: DictationController?
+    /// Звонок суфлёра: создаётся лениво при первом «начать звонок», не в `--screenshot`.
+    private var call: CallController?
     private var hotKey: HotKey?
     /// Не удалось занять сочетание: показываем в меню и на экране, иначе диктовка выглядит
     /// просто сломанной.
@@ -90,12 +114,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private var home: URL { fm.homeDirectoryForCurrentUser }
     private var resultsDirectory: URL { home.appendingPathComponent("ASR/ASROutput/AllOutputs") }
+    /// Архив обработанного аудио — тот же путь, что `Config.default().processed` у worker'а.
+    private var archiveDirectory: URL { home.appendingPathComponent("ASR/Processed/AllRecords") }
     /// Карантин упавших файлов — тот же путь, что `Config.default().failed` у worker'а.
     private var failedDirectory: URL { home.appendingPathComponent("ASR/Failed") }
     /// Служебная папка приложения: логи, состояние, данные приёма с телефона.
     private var serviceDirectory: URL { home.appendingPathComponent("ASR/service") }
     /// Лог worker'а: stdout+stderr Python-процесса. Без него ошибки невидимы (exit-код без причины).
     private var workerLogURL: URL { serviceDirectory.appendingPathComponent("worker.log") }
+    /// Корень `Prompter/` (D1: MLAUD_PROMPTER_DIR — корень, не `calls`); папки звонков — calls.
+    private let prompterPaths = PrompterPaths.resolve()
+    private var promptRoot: URL { prompterPaths.calls }
+    /// Ключи модели: Keychain в установленном приложении, память в --screenshot (D10).
+    private lazy var prompterSecrets: SecretStore = previewOnly ? InMemorySecretStore() : KeychainStore()
+    /// Подключения модели в UserDefaults; пресеты сеются при первом чтении (FR-12.13).
+    private lazy var llmConnections = LLMConnectionsStore(defaults: .standard)
+    private var prompterPaused = false
+    private var compactPanel: CompactPanelController?
 
     /// Недоставленные транскрипты (сеть падала при обработке): досылаются воркером при
     /// следующем прогоне — даже если inbox пуст.
@@ -117,6 +152,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         settings.onChange = { [weak self] change in self?.apply(change) }
+        // Суфлёр этапа 4: посев шаблонов брифов и пресетов подключений; профиль — в model.
+        if !previewOnly {
+            try? BriefStore.seedTemplates(paths: prompterPaths)
+            model.templates = BriefStore.templates(paths: prompterPaths)
+            _ = llmConnections.all          // сеет пресеты
+            refreshConnections()
+            settings.profileText = (try? String(contentsOf: prompterPaths.profile, encoding: .utf8)) ?? ""
+            model.prompterView = .list
+        }
         model.commands = self
         mainWindow = MainWindowController(model: model)
         NSApp.mainMenu = MainMenu.build(delegate: self, windowController: mainWindow)
@@ -154,8 +198,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restartPhoneSync()
         refreshPendingVoices()
         reloadRecordings()
+        recoverCalls()
         publish()
         autoProcess()  // подхватить файлы, накопившиеся пока приложение не работало
+    }
+
+    /// Запись звонка, оборванная крахом: `.incoming/<id>.pcm` при сайдкаре в inbox доделывается
+    /// до `.m4a` (NFR-4), конвейер подхватит файл обычным путём.
+    private func recoverCalls() {
+        guard let inbox = folderStore.inboxFolder else { return }
+        CallRecorder.recover(inbox: inbox) { [weak self] outputs in
+            guard let self, !outputs.isEmpty else { return }
+            for output in outputs {
+                self.notify(title: "Суфлёр — запись восстановлена", body: output.audio.lastPathComponent)
+            }
+            DispatchQueue.main.async { self.autoProcess() }
+        }
     }
 
     /// Клик по иконке в Dock, пока окно закрыто, но приложение ещё `.regular`.
@@ -165,7 +223,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        dictation?.shutdown()  // резидентная модель держит ~1.6 ГБ — отпускаем явно
+        call?.suspendForQuit()   // захваты стоп, файлы .incoming остаются — recover доделает
+        dictation?.shutdown()
+        recognizer.shutdown()    // резидентная модель держит ~1.6 ГБ — отпускаем явно
     }
 
     /// Побочный эффект смены настройки — по ключу, а не «перезапустить всё».
@@ -237,8 +297,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshStatusItem() {
         guard let statusItem else { return }
         if let button = statusItem.button {
-            // Во время диктовки иконка другая — иначе не видно, что микрофон открыт.
-            let symbol = dictation?.state == .off || dictation == nil ? "waveform" : "mic.fill"
+            // Во время диктовки и звонка иконка другая — иначе не видно, что микрофон открыт (ux-app.md §5).
+            let symbol: String
+            if model.call.phase == .running {
+                symbol = "waveform.badge.mic"
+            } else {
+                symbol = dictation?.state == .off || dictation == nil ? "waveform" : "mic.fill"
+            }
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "MLaud")
             button.image?.isTemplate = true
             // Бейдж непрочитанных: иначе о пропущенном баннере узнать неоткуда.
@@ -274,6 +339,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let processItem = NSMenuItem(title: "Обработать сейчас", action: #selector(processNow), keyEquivalent: "r")
         processItem.isEnabled = folderStore.hasInboxFolder && !isProcessing
         menu.addItem(processItem)
+
+        switch model.call.phase {
+        case .running, .finishing:
+            let clock = NitiTimerLabel.clock(model.call.elapsed)
+            let title = model.call.phase == .running ? "Суфлёр: звонок \(clock) — Стоп" : "Суфлёр: звонок \(clock) — завершение…"
+            let item = NSMenuItem(title: title, action: #selector(stopCall), keyEquivalent: "")
+            menu.addItem(item)
+        case .idle, .ready, .done:
+            menu.addItem(NSMenuItem(title: "Суфлёр: начать звонок…", action: #selector(startCallSetup), keyEquivalent: ""))
+        }
 
         if settings.dictationEnabled {
             let combo = settings.dictationHotKey.display
@@ -428,14 +503,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Индекс архива — в фоне: сотни файлов и сайдкаров, главному потоку там делать нечего.
+    /// Заодно список звонков суфлёра и `meeting_id` из `.meta.json` в их `call.json`.
     func reloadRecordings() {
         let index = RecordingIndex(root: resultsDirectory,
-                                   speakersRoot: serviceDirectory.appendingPathComponent("speakers"))
+                                   speakersRoot: serviceDirectory.appendingPathComponent("speakers"),
+                                   archiveRoot: archiveDirectory)
+        let promptRoot = self.promptRoot
+        let outputRoot = self.resultsDirectory
+        let previewOnly = self.previewOnly
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let recordings = index.scan()
+            // reconcile пишет call.json: в режиме снимков к ~/ASR не прикасаемся.
+            if !previewOnly { CallStore.reconcileMeetingIDs(root: promptRoot, outputRoot: outputRoot) }
+            let calls = CallStore.list(root: promptRoot)
+            let briefs = BriefStore.list(paths: PrompterPaths(root: promptRoot.deletingLastPathComponent()),
+                                         calls: calls)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.model.recordings = recordings
+                self.model.calls = calls
+                if !self.previewOnly { self.model.briefs = briefs }
+                self.voices.setArchive(recordings)
                 self.publish()
             }
         }
@@ -540,25 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dictation = nil
         guard settings.dictationEnabled else { return }
 
-        // Замыкание держит значения, а не AppDelegate: пути за время жизни приложения
-        // не меняются, а настройки живут в своём объекте.
-        let python = pythonExecutable
-        let workerDir = workerDirectory
-        let extraPath = additionalPythonPath
-        let inbox = folderStore.inboxFolder ?? fm.homeDirectoryForCurrentUser
-        let store = settingsStore
-        let controller = DictationController {
-            var env = store.workerEnvironment()
-            env["PYTHONUNBUFFERED"] = "1"  // события должны выходить сразу, а не пачкой
-            return WorkerCommand(
-                pythonExecutable: python,
-                workerDirectory: workerDir,
-                inboxFolder: inbox,
-                additionalPythonPath: extraPath,
-                extraEnvironment: env,
-                module: "mlaud_worker.dictate"
-            )
-        }
+        let controller = DictationController(process: recognizer)
         controller.onStateChange = { [weak self] state in
             DictationLog.write("состояние: \(state)")
             self?.publish()
@@ -591,9 +661,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func toggleDictation() {
+        // Третий канал распознавателя не измерен (S1) — во время звонка диктовку нельзя начать;
+        // остановить уже идущую можно всегда, иначе она печатает в чужое поле до конца звонка.
+        guard dictationToggleAllowed else {
+            notify(title: "MLaud — диктовка", body: "во время звонка диктовка недоступна")
+            return
+        }
         DictationLog.write("переключение диктовки из состояния \(dictation?.state.debugName ?? "нет контроллера")")
         dictation?.toggle()
         publish()
+    }
+
+    // MARK: - Суфлёр
+
+    /// Контроллер звонка — лениво: `AudioCapture`/`AppAudioCapture` и запросы к системе только
+    /// по воле пользователя, не при запуске и не в `--screenshot`.
+    private func callController() -> CallController? {
+        guard !previewOnly else { return nil }
+        if let call { return call }
+        let paths = prompterPaths
+        let secrets: SecretStore = prompterSecrets
+        let deps = CallController.Dependencies(
+            recognizer: recognizer,
+            inbox: { [folderStore] in folderStore.inboxFolder },
+            promptRoot: promptRoot,
+            modelType: { [settingsStore] in settingsStore.modelType },
+            makeMic: { AudioCapture(onChunk: $0) },
+            makeApp: { AppAudioCapture(onChunk: $0) },
+            listApps: AppAudioCapture.candidates,
+            now: Date.init,
+            makePrompter: { [weak self] session in
+                guard let self else {
+                    return PrompterController(
+                        deps: PrompterController.Dependencies(
+                            makeCommand: { _ in WorkerCommand(
+                                pythonExecutable: URL(fileURLWithPath: "/usr/bin/true"),
+                                workerDirectory: URL(fileURLWithPath: "/"),
+                                inboxFolder: URL(fileURLWithPath: "/")) },
+                            paths: PrompterPaths(root: URL(fileURLWithPath: "/")),
+                            now: Date.init),
+                        session: session)
+                }
+                let controller = PrompterController(
+                    deps: PrompterController.Dependencies(
+                        makeCommand: { [weak self] key in
+                            var extra = ["MLAUD_LLM_KEY": key, "PYTHONUNBUFFERED": "1"]
+                            if let dir = ProcessInfo.processInfo.environment["MLAUD_PROMPTER_DIR"], !dir.isEmpty {
+                                extra["MLAUD_PROMPTER_DIR"] = dir
+                            }
+                            if let budget = self?.settingsStore.materialsBudgetTokens {
+                                extra["MLAUD_MATERIALS_BUDGET"] = String(budget)
+                            }
+                            return WorkerCommand(
+                                pythonExecutable: self?.pythonExecutable ?? URL(fileURLWithPath: "/usr/bin/python3"),
+                                workerDirectory: self?.workerDirectory ?? URL(fileURLWithPath: "."),
+                                inboxFolder: self?.folderStore.inboxFolder ?? URL(fileURLWithPath: "/tmp"),
+                                additionalPythonPath: self?.additionalPythonPath ?? [],
+                                extraEnvironment: extra,
+                                module: "mlaud_worker.prompter")
+                        },
+                        paths: paths,
+                        now: Date.init),
+                    session: session)
+                return controller
+            },
+            connections: llmConnections,
+            secrets: secrets,
+            settings: settingsStore,
+            paths: paths
+        )
+        let controller = CallController(deps: deps)
+        controller.onChange = { [weak self, weak controller] snapshot in
+            guard let self, let controller else { return }
+            self.applyCallSnapshot(snapshot, from: controller)
+        }
+        controller.onNotify = { [weak self] title, body in
+            self?.notify(title: title, body: body)
+        }
+        call = controller
+        return controller
+    }
+
+    /// Снимок звонка → модель. `publish()` сканирует inbox и карантин и пересобирает меню,
+    /// а уровни приходят на каждый кусок звука — публикуем только по фазе, секунде и распознавателю.
+    private func applyCallSnapshot(_ snapshot: CallSnapshot, from controller: CallController) {
+        let previous = model.call
+        model.call = snapshot
+        syncCallApps(from: controller)
+        if snapshot.phase == .done, previous.phase != .done {
+            reloadRecordings()
+        }
+        if previous.phase != snapshot.phase
+            || Int(previous.elapsed) != Int(snapshot.elapsed)
+            || previous.recognizer != snapshot.recognizer {
+            publish()
+        }
+    }
+
+    /// Кандидаты контроллера → модель; приложение по умолчанию из настроек — пока выбора нет.
+    private func syncCallApps(from controller: CallController) {
+        model.callApps = controller.candidates
+        if controller.selectedApp == nil, model.call.phase == .ready,
+           let wanted = settings.callAppBundleID,
+           let candidate = controller.candidates.first(where: { $0.bundleID == wanted }) {
+            controller.selectedApp = candidate
+        }
+        model.callAppPID = controller.selectedApp?.pid
+    }
+
+    /// ⌘R в главном меню — по контексту (D5): в «Суфлёре» старт/стоп звонка, иначе обработка.
+    @objc func primaryAction() {
+        switch (model.section, model.call.phase) {
+        case (.prompter, .ready): startCall()
+        case (.prompter, .running): stopCall()
+        default: processNow()
+        }
     }
 
     /// Объясняем ловушку ad-hoc подписи. Просто «дайте разрешение» здесь бесполезно:
@@ -694,9 +876,23 @@ extension AppDelegate: AppCommands {
     }
 
     func requestMicrophone() {
+        // Чек-лист звонка ведёт контроллер: повторный prepare() в .ready заново спрашивает разрешение
+        // и обновляет снимок; голый requestPermission обновил бы только экран «Диктовка».
+        if let controller = call, controller.session.snapshot.phase == .ready {
+            controller.prepare()
+            return
+        }
         AudioCapture.requestPermission { [weak self] _ in
             DispatchQueue.main.async { self?.publish() }
         }
+    }
+
+    /// Возврат из «Конфиденциальности и безопасности»: разрешение на микрофон macOS выдаёт без
+    /// перезапуска, а чек-лист узнаёт о нём только при повторной проверке.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard let controller = call, controller.session.snapshot.phase == .ready,
+              case .denied = controller.session.snapshot.microphone else { return }
+        controller.prepare()
     }
 
     func openAccessibilitySettings() {
@@ -802,6 +998,494 @@ extension AppDelegate: AppCommands {
     }
 
     func showStyleguide() { mainWindow.show(section: .styleguide) }
+
+    // Суфлёр (этап 3, §4.6)
+
+    @objc func startCallSetup() {
+        openMainWindow()
+        model.section = .prompter
+        guard let controller = callController() else { return }
+        // «Начать звонок…» из меню при показанном итоге прошлого звонка — закрыть его и готовить новый.
+        if controller.session.snapshot.phase == .done {
+            controller.dismiss()
+        }
+        if controller.session.snapshot.phase == .idle {
+            controller.prepare()
+        }
+        syncCallApps(from: controller)
+    }
+
+    /// Во время звонка диктовку можно только остановить (S1: третий канал не измерен).
+    private var dictationToggleAllowed: Bool {
+        model.call.phase != .running || dictation?.state == .listening
+    }
+
+    @objc func startCall() {
+        guard let controller = callController(), controller.session.snapshot.canStart else { return }
+        // Звонок и диктовка не живут вместе: два захвата микрофона и три сессии распознавателя.
+        switch dictation?.state ?? .off {
+        case .listening:
+            DictationLog.write("диктовка закрыта: начинается звонок")
+            dictation?.toggle()
+        case .starting:
+            notify(title: "MLaud — суфлёр", body: "диктовка ещё запускается — дождитесь её или выключите, затем «Старт»")
+            return
+        case .off:
+            break
+        }
+        controller.start()
+    }
+
+    @objc func stopCall() {
+        guard let controller = call, controller.session.snapshot.phase == .running else { return }
+        controller.stop()
+    }
+
+    func dismissCall() {
+        call?.dismiss()
+        reloadRecordings()
+    }
+
+    func refreshCallApps() {
+        guard let controller = callController() else { return }
+        controller.refreshApps()
+        // `onChange` молчит, если чек-лист не изменился, — список кандидатов подтягиваем сами.
+        for delay in [0.7, 2.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak controller] in
+                guard let self, let controller else { return }
+                self.syncCallApps(from: controller)
+            }
+        }
+    }
+
+    func selectCallApp(_ pid: Int32?) {
+        guard let controller = callController() else { return }
+        controller.selectedApp = pid.flatMap { id in controller.candidates.first { $0.pid == id } }
+        settings.callAppBundleID = controller.selectedApp?.bundleID
+        model.callAppPID = controller.selectedApp?.pid
+    }
+
+    func openScreenRecordingSettings() {
+        let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Согласие на «Запись экрана» выдаётся процессу при запуске (poc/appaudio/RESULT.md:78) — нужен перезапуск.
+    func relaunchApp() {
+        guard Bundle.main.bundleIdentifier != nil else {
+            notify(title: "MLaud — суфлёр", body: "dev-запуск без бандла: перезапустите `swift run` руками")
+            return
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-n", Bundle.main.bundleURL.path]
+        do {
+            try process.run()
+            NSApp.terminate(nil)
+        } catch {
+            notify(title: "MLaud — суфлёр", body: "Не удалось перезапустить: \(error.localizedDescription)")
+        }
+    }
+
+    func openCallFolder(_ callID: String) {
+        let folder = CallStore.folder(root: promptRoot, callID: callID)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(folder)
+    }
+
+    // Суфлёр — этап 4 (§4.5)
+
+    private func refreshConnections() {
+        settings.connections = llmConnections.all
+        settings.defaultConnectionID = llmConnections.defaultID
+        settings.connectionHasKey = Dictionary(uniqueKeysWithValues:
+            settings.connections.map { ($0.id, prompterSecrets.secret(for: $0.id) != nil) })
+    }
+
+    /// Перечитать бриф и материалы из папки (правки руками в Finder видны при открытии).
+    private func openBriefEditor(slug: String) {
+        do {
+            let brief = try BriefStore.load(paths: prompterPaths, slug: slug)
+            model.editingBriefSlug = slug
+            model.editingBrief = brief
+            model.prompterView = .editor
+            refreshMaterials(slug: slug)
+        } catch {
+            notify(title: "MLaud — суфлёр", body: "Бриф не открылся: \(error.localizedDescription)")
+        }
+    }
+
+    private func refreshMaterials(slug: String) {
+        let command = WorkerCommand(
+            pythonExecutable: pythonExecutable,
+            workerDirectory: workerDirectory,
+            inboxFolder: folderStore.inboxFolder ?? serviceDirectory,
+            additionalPythonPath: additionalPythonPath,
+            extraEnvironment: ["MLAUD_MATERIALS_BUDGET": String(settingsStore.materialsBudgetTokens)],
+            module: "mlaud_worker.prompter",
+            moduleArguments: ["--materials", prompterPaths.materials(slug: slug).path,
+                              "--budget", String(settingsStore.materialsBudgetTokens)])
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = command.makeProcess()
+            let stdout = Pipe()
+            process.standardOutput = stdout
+            process.standardError = FileHandle.nullDevice
+            var report: MaterialsReport?
+            if (try? process.run()) != nil {
+                let data = stdout.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                report = try? MaterialsReport.decode(data)
+            }
+            DispatchQueue.main.async {
+                self?.model.editingMaterials = report
+            }
+        }
+    }
+
+    /// ⌘N: меню шаблонов; валидно только в разделе «Суфлёр» (validateMenuItem).
+    @objc func newBriefMenu() {
+        let menu = NSMenu()
+        let titles = ["продажа": "sale", "интервью": "interview", "переговоры": "negotiation",
+                      "встреча": "meeting", "свой": "custom"]
+        for (index, pair) in titles.enumerated() {
+            let item = NSMenuItem(title: "Бриф: \(pair.key)", action: #selector(newBriefPicked(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            menu.addItem(item)
+        }
+        if let event = NSApp.currentEvent, let window = NSApp.keyWindow {
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+            _ = event
+            _ = window
+        }
+    }
+
+    @objc private func newBriefPicked(_ sender: NSMenuItem) {
+        let slugs = ["sale", "interview", "negotiation", "meeting", "custom"]
+        guard sender.tag < slugs.count else { return }
+        newBrief(template: slugs[sender.tag])
+    }
+
+    func newBrief(template: String) {
+        let alert = NSAlert()
+        alert.messageText = "Название брифа"
+        alert.informativeText = "Например: «Интервью — Иван Петров, senior BA»"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Создать")
+        alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let title = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty else { return }
+        do {
+            let slug = try BriefStore.newBrief(paths: prompterPaths, template: template, title: title)
+            reloadRecordings()
+            openBriefEditor(slug: slug)
+        } catch {
+            notify(title: "MLaud — суфлёр", body: "Бриф не создался: \(error.localizedDescription)")
+        }
+    }
+
+    func openBrief(slug: String) {
+        openBriefEditor(slug: slug)
+    }
+
+    func saveBrief(_ brief: Brief) {
+        guard let slug = model.editingBriefSlug else { return }
+        do {
+            try BriefStore.save(brief, paths: prompterPaths, slug: slug)
+        } catch {
+            notify(title: "MLaud — суфлёр", body: "Бриф не сохранился: \(error.localizedDescription)")
+        }
+    }
+
+    func duplicateBrief(slug: String) {
+        do {
+            let copy = try BriefStore.duplicate(paths: prompterPaths, slug: slug)
+            reloadRecordings()
+            openBriefEditor(slug: copy)
+        } catch {
+            notify(title: "MLaud — суфлёр", body: "Копия не создалась: \(error.localizedDescription)")
+        }
+    }
+
+    func deleteBrief(slug: String) {
+        let alert = NSAlert()
+        alert.messageText = "Удалить бриф?"
+        alert.informativeText = "Папка брифа и материалы будут удалены. Звонки останутся."
+        alert.addButton(withTitle: "Удалить")
+        alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try BriefStore.delete(paths: prompterPaths, slug: slug)
+            model.prompterView = .list
+            reloadRecordings()
+        } catch {
+            notify(title: "MLaud — суфлёр", body: "Бриф не удалился: \(error.localizedDescription)")
+        }
+    }
+
+    func openBriefFolder(slug: String) {
+        NSWorkspace.shared.open(prompterPaths.briefs.appendingPathComponent(slug, isDirectory: true))
+    }
+
+    func addMaterials(slug: String, urls: [URL]) {
+        for url in urls {
+            _ = try? BriefStore.addMaterial(paths: prompterPaths, slug: slug, from: url)
+        }
+        refreshMaterials(slug: slug)
+    }
+
+    func addMaterialFromRecordings(slug: String, base: String) {
+        // «Из записей»: копия .txt транскрипта из архива (FR-12.5) — запись за месяц до base.
+        let candidates = [resultsDirectory.appendingPathComponent(String(base.prefix(7))).appendingPathComponent(base + ".txt")]
+        for url in candidates where fm.fileExists(atPath: url.path) {
+            _ = try? BriefStore.addMaterial(paths: prompterPaths, slug: slug, from: url)
+        }
+        refreshMaterials(slug: slug)
+    }
+
+    func removeMaterial(slug: String, name: String) {
+        try? BriefStore.removeMaterial(paths: prompterPaths, slug: slug, name: name)
+        refreshMaterials(slug: slug)
+    }
+
+    func startCall(brief slug: String) {
+        startCallSetup()
+        guard let controller = callController(),
+              let brief = try? BriefStore.load(paths: prompterPaths, slug: slug) else { return }
+        controller.prepare(brief: (slug, brief))
+        if controller.session.snapshot.canStart {
+            startCall()
+        }
+    }
+
+    func requestHint() {
+        call?.requestHint()
+    }
+
+    func togglePrompterPause() {
+        guard let prompter = call?.prompter else { return }
+        prompterPaused.toggle()
+        prompter.setPaused(prompterPaused)
+    }
+
+    func pinCard(_ id: String) {
+        call?.session.apply(.pin(id))
+    }
+
+    func unpinCard(_ id: String) {
+        call?.session.apply(.unpin(id))
+    }
+
+    func dismissCard(_ id: String) {
+        call?.session.apply(.dismissCard(id))
+    }
+
+    func requestDetail(_ id: String) {
+        call?.requestDetail(id)
+    }
+
+    func copyCard(_ id: String) {
+        let card = model.call.prompter.cards.first { $0.id == id }
+            ?? model.call.prompter.pinned.first { $0.id == id }
+        guard let card else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(card.text, forType: .string)
+        model.toast = "Скопировано"
+    }
+
+    func setAgenda(item: String, status: AgendaStatus) {
+        call?.session.apply(.agendaManual(item: item, status: status))
+    }
+
+    func addNote(_ text: String) {
+        guard !text.isEmpty else { return }
+        call?.session.apply(.note(text))
+    }
+
+    func cancelOutcome() {
+        call?.cancelOutcome()
+    }
+
+    func openOutcome(callID: String) {
+        model.prompterView = .outcome(callID: callID)
+        model.section = .prompter
+    }
+
+    func saveOutcome(callID: String, markdown: String) {
+        CallStore.writeOutcomeMarkdown(root: promptRoot, callID: callID, text: markdown)
+    }
+
+    /// Опоздавшие итоги — руками (§3.7): `telegram send <outcome.md>` с ключами доставки.
+    func sendOutcomeToTelegram(callID: String) {
+        let outcome = CallStore.folder(root: promptRoot, callID: callID).appendingPathComponent("outcome.md")
+        guard fm.fileExists(atPath: outcome.path) else {
+            model.toast = "Итогов нет — звонок без суфлёра"
+            return
+        }
+        let command = WorkerCommand(
+            pythonExecutable: pythonExecutable,
+            workerDirectory: workerDirectory,
+            inboxFolder: folderStore.inboxFolder ?? serviceDirectory,
+            additionalPythonPath: additionalPythonPath,
+            extraEnvironment: settingsStore.workerEnvironment(),
+            module: "mlaud_worker.telegram",
+            moduleArguments: ["send", outcome.path])
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = command.makeProcess()
+            process.standardOutput = FileHandle.nullDevice
+            let stderr = Pipe()
+            process.standardError = stderr
+            _ = try? process.run()
+            process.waitUntilExit()
+            let text = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let ok = process.terminationStatus == 0
+            DispatchQueue.main.async {
+                self?.model.toast = ok ? "Отправлено" : ("Не отправилось: " + text.prefix(80))
+            }
+        }
+    }
+
+    func copyOutcome(callID: String) {
+        if let outcome = CallStore.readOutcome(root: promptRoot, callID: callID) {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(outcome.markdown, forType: .string)
+            model.toast = "Скопировано"
+        }
+    }
+
+    func toggleCompactPanel() {
+        if compactPanel == nil { compactPanel = CompactPanelController(model: model) }
+        compactPanel?.toggle()
+    }
+
+    func saveProfile(_ text: String) {
+        try? text.write(to: prompterPaths.profile, atomically: true, encoding: .utf8)
+    }
+
+    func saveConnection(_ c: LLMConnection, key: String?) {
+        llmConnections.save(c)
+        if let key = key?.trimmingCharacters(in: .whitespaces) {
+            if key.isEmpty {
+                try? prompterSecrets.setSecret(nil, for: c.id)
+            } else {
+                do { try prompterSecrets.setSecret(key, for: c.id) } catch {
+                    notify(title: "MLaud — суфлёр", body: "Keychain: \(error.localizedDescription)")
+                }
+            }
+        }
+        refreshConnections()
+    }
+
+    func removeConnection(id: String) {
+        llmConnections.remove(id: id)
+        try? prompterSecrets.setSecret(nil, for: id)
+        refreshConnections()
+    }
+
+    func setDefaultConnection(id: String) {
+        llmConnections.defaultID = id
+        refreshConnections()
+    }
+
+    /// «Проверить» (FR-12.13): `--check` с ключом подключения, stdin — JSON подключения.
+    func checkConnection(id: String) {
+        guard let connection = llmConnections.all.first(where: { $0.id == id }),
+              let key = prompterSecrets.secret(for: id)
+        else {
+            settings.connectionCheck[id] = .failed("нет ключа")
+            return
+        }
+        settings.connectionCheck[id] = .running
+        let command = WorkerCommand(
+            pythonExecutable: pythonExecutable,
+            workerDirectory: workerDirectory,
+            inboxFolder: folderStore.inboxFolder ?? serviceDirectory,
+            additionalPythonPath: additionalPythonPath,
+            extraEnvironment: ["MLAUD_LLM_KEY": key, "PYTHONUNBUFFERED": "1"],
+            module: "mlaud_worker.prompter",
+            moduleArguments: ["--check"])
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = command.makeProcess()
+            let stdin = Pipe()
+            let stdout = Pipe()
+            process.standardInput = stdin
+            process.standardOutput = stdout
+            process.standardError = FileHandle.nullDevice
+            var result: SettingsModel.ConnectionCheck = .failed("не запустился")
+            if (try? process.run()) != nil {
+                stdin.fileHandleForWriting.write(Self.checkPayload(connection))
+                stdin.fileHandleForWriting.closeFile()
+                let out = stdout.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if let obj = try? JSONSerialization.jsonObject(with: out) as? [String: Any] {
+                    if obj["ok"] as? Bool == true {
+                        result = .ok(ttftMs: (obj["ttft_ms"] as? NSNumber)?.intValue ?? 0)
+                    } else {
+                        result = .failed((obj["message"] as? String) ?? "ошибка")
+                    }
+                } else {
+                    result = .failed("код \(process.terminationStatus)")
+                }
+            }
+            DispatchQueue.main.async { self?.settings.connectionCheck[id] = result }
+        }
+    }
+
+    /// JSON для --check: connection как в start, null вместо отсутствующих цен.
+    private static func checkPayload(_ connection: LLMConnection) -> Data {
+        var reasoning: Any = NSNull()
+        switch connection.reasoning {
+        case .off: reasoning = ["enabled": false]
+        case .effort(let e): reasoning = ["effort": e]
+        case .unspecified: break
+        }
+        let payload: [String: Any] = ["connection": [
+            "base_url": connection.baseURL,
+            "model": connection.model,
+            "reasoning": reasoning,
+            "price_per_mtok": [
+                "in": connection.price.input.map { $0 as Any } ?? NSNull(),
+                "out": connection.price.output.map { $0 as Any } ?? NSNull(),
+                "cached": connection.price.cached.map { $0 as Any } ?? NSNull()],
+        ] as [String: Any]]
+        return (try! JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])) + Data("\n".utf8)
+    }
+}
+
+// MARK: - Пункты меню
+
+extension AppDelegate: NSMenuItemValidation {
+    /// С этим протоколом доступность всех пунктов с целью `AppDelegate` решается здесь,
+    /// ручные `isEnabled` в `buildMenu` система перекрывает.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(primaryAction):
+            switch (model.section, model.call.phase) {
+            case (.prompter, .ready):
+                item.title = "Старт звонка"
+                return model.call.canStart
+            case (.prompter, .running):
+                item.title = "Стоп звонка"
+                return true
+            default:
+                item.title = "Обработать сейчас"
+                return folderStore.hasInboxFolder && !isProcessing && !previewOnly
+            }
+        case #selector(processNow):
+            return folderStore.hasInboxFolder && !isProcessing && !previewOnly
+        case #selector(toggleDictation):
+            return dictation?.state != .starting && dictationToggleAllowed
+        case #selector(startCallSetup):
+            return !previewOnly && model.call.phase != .running && model.call.phase != .finishing
+        case #selector(stopCall):
+            return model.call.phase == .running
+        default:
+            return true
+        }
+    }
 }
 
 // MARK: - Отклик на системный баннер

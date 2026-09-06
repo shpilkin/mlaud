@@ -18,12 +18,36 @@ RSS), иначе первое слово ждёт две секунды.
   → {"t":"preview","text":"…"}             хвост ещё может перепишаться
   → {"t":"error","message":"…"}
   → {"t":"stat","reason":"silence|overflow","window_sec":…,"decodes":…}
+
+Каналы живого звонка (docs/feature-prompter.md §5.1). Форма событий фиксируется
+при создании сессии: команда без `ch` — сессия `main`, события как выше, байт в байт;
+команда с `ch` — канальная сессия, события несут `ch` и номер фразы, вместо `stat` —
+`phrase`. Канал `main` зарезервирован за диктовкой и отвергается.
+
+  ← {"t":"open","ch":"them","label":"Собеседник"}   свои VAD, трекер, счётчики; повторный open — заново
+  ← {"t":"audio","ch":"them","pcm":"…"}             без open — канал создаётся сам
+  ← {"t":"flush","ch":"them"}                        закрыть фразу, reason "flush"
+  ← {"t":"reset","ch":"them"}                        выбросить окно; received и phrase не трогаются
+  ← {"t":"close","ch":"them"}                        flush + удалить канал; quit каналы НЕ закрывает
+  → {"t":"commit","ch":"them","phrase":12,"text":"…"}
+  → {"t":"preview","ch":"them","phrase":12,"text":"…"}
+  → {"t":"phrase","ch":"them","phrase":12,"t0":183.2,"t1":190.6,"text":"…",
+     "reason":"silence|overflow|flush","window_sec":7.4,"decodes":18}
+  → {"t":"error","ch":"them","message":"…"}          ch — если был в команде
+
+`t0`/`t1` — секунды принятого звука канала от `open` (включая тишину), не wall-clock.
+`text` в `phrase` — финальный разбор всего окна; `commit` при закрытии несёт только хвост.
+Канальные сессии несут сторож отставания (poc/live2ch/RESULT.md:66-69): если разбор
+отстал от принятого звука больше чем на `max_lag_sec`, периодический переразбор
+пропускается, пока не догоним; VAD и закрытие фраз работают как обычно.
 """
 
 import base64
+import functools
 import json
 import os
 import sys
+import time
 from typing import Callable, Optional
 
 import numpy as np
@@ -140,6 +164,10 @@ class DictationSession:
 
     `decode` — функция (np.ndarray 16 кГц float32) -> str. В тестах подставляется
     заглушкой, в бою — gigaam.
+
+    `ch=None` — унаследованная сессия диктовки: события без `ch`, `stat` при закрытии
+    фразы. `ch` задан — канальная сессия звонка: события с `ch` и `phrase`, вместо
+    `stat` — `phrase` с `t0`/`t1` по принятому звуку.
     """
 
     def __init__(self, decode: Callable[[np.ndarray], str],
@@ -147,19 +175,48 @@ class DictationSession:
                  max_window_sec: float = MAX_WINDOW_SEC,
                  sr: int = SR,
                  tracker: Optional[CommitTracker] = None,
-                 vad: Optional[SilenceDetector] = None):
+                 vad: Optional[SilenceDetector] = None,
+                 *, ch: Optional[str] = None, label: Optional[str] = None,
+                 clock: Callable[[], float] = time.monotonic,
+                 max_lag_sec: Optional[float] = None):
         self.decode = decode
         self.decode_every = int(decode_every_sec * sr)
         self.max_window = int(max_window_sec * sr)
         self.sr = sr
         self.tracker = tracker or CommitTracker()
         self.vad = vad if vad is not None else SilenceDetector(sr=sr)
+        self.ch = ch
+        self.label = label
+        self.clock = clock
+        self.max_lag_sec = max_lag_sec
+        self.received = 0           # сэмплов принято с создания; reset() не обнуляет
+        self.phrase = 1             # номер открытой фразы; += 1 после события phrase
+        self._t_first: Optional[float] = None
         self._window = np.zeros(0, dtype=np.float32)
         self._undecoded = 0
         self._decodes = 0
 
+    def _event(self, kind: str, **fields) -> dict:
+        """Событие наверх; канальная сессия добавляет ch и phrase сразу после t."""
+        ev: dict = {"t": kind}
+        if self.ch is not None:
+            ev["ch"] = self.ch
+            ev["phrase"] = self.phrase
+        ev.update(fields)
+        return ev
+
+    def _behind(self) -> bool:
+        """Сторож отставания: разбор отстал от принятого звука больше max_lag_sec."""
+        if self.max_lag_sec is None or self._t_first is None:
+            return False
+        lag = (self.clock() - self._t_first) - self.received / self.sr
+        return lag > self.max_lag_sec
+
     def feed(self, samples: np.ndarray) -> list[dict]:
         """Добавить кусок звука. Вернуть события для отправки наверх."""
+        if self._t_first is None:
+            self._t_first = self.clock()
+        self.received += samples.size
         self._window = np.concatenate([self._window, samples])
         self._undecoded += samples.size
         events: list[dict] = []
@@ -173,14 +230,14 @@ class DictationSession:
             events.extend(self.flush(reason="silence" if end_of_phrase else "overflow"))
             return events
 
-        if self._undecoded >= self.decode_every:
+        if self._undecoded >= self.decode_every and not self._behind():
             self._undecoded = 0
             self._decodes += 1
             text = self.decode(self._window)
             committed = self.tracker.update(text)
             if committed:
-                events.append({"t": "commit", "text": committed})
-            events.append({"t": "preview", "text": self.tracker.preview()})
+                events.append(self._event("commit", text=committed))
+            events.append(self._event("preview", text=self.tracker.preview()))
         return events
 
     def flush(self, reason: str = "manual") -> list[dict]:
@@ -189,12 +246,20 @@ class DictationSession:
         if self._window.size:
             window_sec = round(self._window.size / self.sr, 1)
             decodes = self._decodes
-            rest = self.tracker.finalize(self.decode(self._window))
+            text = self.decode(self._window)
+            rest = self.tracker.finalize(text)
             if rest:
-                events.append({"t": "commit", "text": rest})
-                events.append({"t": "preview", "text": ""})
-            events.append({"t": "stat", "reason": reason,
-                           "window_sec": window_sec, "decodes": decodes})
+                events.append(self._event("commit", text=rest))
+                events.append(self._event("preview", text=""))
+            if self.ch is None:
+                events.append(self._event("stat", reason=reason,
+                                          window_sec=window_sec, decodes=decodes))
+            else:
+                t0 = round((self.received - self._window.size) / self.sr, 2)
+                t1 = round(self.received / self.sr, 2)
+                events.append(self._event("phrase", t0=t0, t1=t1, text=text, reason=reason,
+                                          window_sec=window_sec, decodes=decodes))
+                self.phrase += 1
         self.reset()
         return events
 
@@ -204,6 +269,75 @@ class DictationSession:
         self._decodes = 0
         self.tracker.reset()
         self.vad.reset()
+
+    def close(self) -> list[dict]:
+        """Канал закрывается клиентом: дорассказать всё, что накопилось."""
+        return self.flush(reason="flush")
+
+
+class ChannelRegistry:
+    """Сессии по каналам над одним decode (poc/live2ch/run.py, S1).
+
+    Команда без `ch` относится к сессии `main` — унаследованной диктовке. Команда
+    с `ch` — к канальной сессии; `main` как явный `ch` отвергается, иначе диктовка
+    получала бы события с `ch`.
+    """
+
+    MAIN = "main"
+
+    def __init__(self, make_session: Callable[[Optional[str], Optional[str]], DictationSession]):
+        self._make = make_session
+        self._sessions: dict[str, DictationSession] = {}
+
+    def session(self, ch: Optional[str]) -> DictationSession:
+        """Сессия канала; создаётся лениво (для канала — с label = ch)."""
+        key = self.MAIN if ch is None else ch
+        s = self._sessions.get(key)
+        if s is None:
+            s = self._make(ch, ch)
+            self._sessions[key] = s
+        return s
+
+    @staticmethod
+    def _error(ch: Optional[str], message: str) -> dict:
+        ev: dict = {"t": "error"}
+        if ch is not None:
+            ev["ch"] = ch
+        ev["message"] = message
+        return ev
+
+    def handle(self, msg: dict) -> list[dict]:
+        """Одна команда → события."""
+        kind = msg.get("t")
+        ch = msg.get("ch")
+        if ch == self.MAIN:
+            return [self._error(ch, "канал main зарезервирован")]
+        if kind == "open":
+            if ch is None:
+                return [self._error(None, "open без ch")]
+            self._sessions[ch] = self._make(ch, msg.get("label") or ch)
+            return []
+        if kind == "audio":
+            samples = pcm16_to_float32(base64.b64decode(msg.get("pcm", "")))
+            return self.session(ch).feed(samples)
+        if kind == "flush":
+            s = self.session(ch)
+            return s.flush() if ch is None else s.flush(reason="flush")
+        if kind == "reset":
+            self.session(ch).reset()
+            return []
+        if kind == "close" and ch is not None:
+            s = self._sessions.pop(ch, None)
+            return s.close() if s is not None else []
+        return [self._error(ch, f"неизвестная команда: {kind}")]
+
+    def close_all(self) -> list[dict]:
+        """Закрыть все сессии (для тестов; serve на quit этого не делает)."""
+        events: list[dict] = []
+        for s in list(self._sessions.values()):
+            events.extend(s.close())
+        self._sessions.clear()
+        return events
 
 
 def pcm16_to_float32(raw: bytes) -> np.ndarray:
@@ -236,6 +370,12 @@ def _emit(event: dict, out=None) -> None:
     stream.flush()
 
 
+def _make_session(decode: Callable[[np.ndarray], str], ch: Optional[str],
+                  label: Optional[str]) -> DictationSession:
+    """Сессия для serve: сторож отставания только у каналов, диктовка без изменений."""
+    return DictationSession(decode, ch=ch, label=label, max_lag_sec=1.0 if ch else None)
+
+
 def serve(stdin=None, stdout=None, decode: Optional[Callable] = None,
           model_type: str = "rnnt") -> int:
     """Резидентный цикл: читает команды из stdin, пишет события в stdout."""
@@ -247,7 +387,7 @@ def serve(stdin=None, stdout=None, decode: Optional[Callable] = None,
         _emit({"t": "error", "message": str(e)}, stdout)
         return 1
 
-    session = DictationSession(decode)
+    registry = ChannelRegistry(functools.partial(_make_session, decode))
     _emit({"t": "ready"}, stdout)
 
     for line in stdin:
@@ -259,23 +399,16 @@ def serve(stdin=None, stdout=None, decode: Optional[Callable] = None,
         except json.JSONDecodeError:
             _emit({"t": "error", "message": "не JSON"}, stdout)
             continue
-        kind = msg.get("t")
-        if kind == "quit":
+        if not isinstance(msg, dict):
+            _emit({"t": "error", "message": "не JSON-объект"}, stdout)
+            continue
+        if msg.get("t") == "quit":
             break
         try:
-            if kind == "audio":
-                samples = pcm16_to_float32(base64.b64decode(msg.get("pcm", "")))
-                for ev in session.feed(samples):
-                    _emit(ev, stdout)
-            elif kind == "flush":
-                for ev in session.flush():
-                    _emit(ev, stdout)
-            elif kind == "reset":
-                session.reset()
-            else:
-                _emit({"t": "error", "message": f"неизвестная команда: {kind}"}, stdout)
+            for ev in registry.handle(msg):
+                _emit(ev, stdout)
         except Exception as e:  # noqa: BLE001 — один сбойный кадр не роняет сессию
-            _emit({"t": "error", "message": str(e)}, stdout)
+            _emit(ChannelRegistry._error(msg.get("ch"), str(e)), stdout)
     return 0
 
 

@@ -26,10 +26,17 @@ public struct Recording: Identifiable, Equatable, Sendable {
     public let needsLabeling: Bool
     /// Рядом лежит `<base>.prompter.md` — звонок с суфлёром, есть итоги.
     public let hasPrompter: Bool
+    /// Есть сайдкар разметки голосов (`service/speakers/<период>/<base>/speakers.json`),
+    /// пусть даже надгробие после «Убрать из списка» или ретенции. Без него запись обработана
+    /// до голос-ID: «Разметить всё без сайдкара» гонит её заново.
+    public let hasSidecar: Bool
+    /// Запись звонка: рядом с аудио в архиве лежит `<base>.channels.json` — подписи каналов,
+    /// диаризация к ней не применяется (ADR-026), в кандидаты переразметки не попадает.
+    public let isCall: Bool
 
     public init(id: String, base: String, period: String, txt: URL, srt: URL?, audio: URL?,
                 date: Date, dateIsExact: Bool, durationSec: Double?, speakers: [String],
-                needsLabeling: Bool, hasPrompter: Bool) {
+                needsLabeling: Bool, hasPrompter: Bool, hasSidecar: Bool = false, isCall: Bool = false) {
         self.id = id
         self.base = base
         self.period = period
@@ -42,6 +49,8 @@ public struct Recording: Identifiable, Equatable, Sendable {
         self.speakers = speakers
         self.needsLabeling = needsLabeling
         self.hasPrompter = hasPrompter
+        self.hasSidecar = hasSidecar
+        self.isCall = isCall
     }
 
     /// Приблизительная дата попала в месяц каталога периода. Если нет (файл скопирован или
@@ -75,11 +84,19 @@ public struct RecordingIndex {
 
     public let root: URL
     public let speakersRoot: URL?
+    /// Архив аудио `Processed/AllRecords/<период>/`: у записей без `.meta.json` аудио ищется
+    /// там по имени транскрипта — старый конвейер клал оба файла в один месяц.
+    public let archiveRoot: URL?
 
-    public init(root: URL, speakersRoot: URL? = nil) {
+    public init(root: URL, speakersRoot: URL? = nil, archiveRoot: URL? = nil) {
         self.root = root
         self.speakersRoot = speakersRoot
+        self.archiveRoot = archiveRoot
     }
+
+    static let audioExtensions: Set<String> = [
+        "m4a", "mp3", "wav", "aac", "flac", "ogg", "opus", "mp4", "aiff", "aif", "caf", "m4b", "amr",
+    ]
 
     /// Все записи, новые сверху. Каталог периода — любой подкаталог архива; файл — любой
     /// `.txt` в нём. Битый или отсутствующий сайдкар — не повод прятать запись.
@@ -89,6 +106,8 @@ public struct RecordingIndex {
             at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         else { return [] }
         let speakers = speakersByKey()
+        var archiveNames: [String: [String: URL]] = [:]
+        var archiveChannels: [String: [String: ChannelsSidecar]] = [:]
         var out: [Recording] = []
         for periodURL in periods {
             guard (try? periodURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
@@ -98,6 +117,11 @@ public struct RecordingIndex {
             else { continue }
             let period = periodURL.lastPathComponent
             let names = Set(files.map(\.lastPathComponent))
+            if let archiveRoot, archiveNames[period] == nil {
+                let archiveDir = archiveRoot.appendingPathComponent(period)
+                archiveNames[period] = Self.audioByBase(in: archiveDir)
+                archiveChannels[period] = Self.channelsByBase(in: archiveDir)
+            }
             for txt in files where txt.pathExtension == "txt" {
                 let base = txt.deletingPathExtension().lastPathComponent
                 let meta = Self.readMeta(periodURL.appendingPathComponent(base + ".meta.json"))
@@ -105,19 +129,24 @@ public struct RecordingIndex {
                 let stamps = try? txt.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
                 let fallback = [stamps?.creationDate, stamps?.contentModificationDate].compactMap { $0 }.min()
                 let info = speakers["\(period)/\(base)"]
+                // D14: без разметки голосов имена говорящих звонка — метки каналов из архива.
+                let channels = archiveChannels[period]?[base]
+                let channelNames = info == nil ? channels.map { sidecar in CallChannel.allCases.map(sidecar.label) } : nil
                 out.append(Recording(
                     id: "\(period)/\(base)",
                     base: base,
                     period: period,
                     txt: txt,
                     srt: names.contains(base + ".srt") ? periodURL.appendingPathComponent(base + ".srt") : nil,
-                    audio: Self.audioURL(meta),
+                    audio: Self.audioURL(meta) ?? archiveNames[period]?[base],
                     date: started ?? fallback ?? .distantPast,
                     dateIsExact: started != nil,
                     durationSec: meta?.durationSec,
-                    speakers: info?.names ?? [],
+                    speakers: info?.names ?? channelNames ?? [],
                     needsLabeling: info?.pending ?? false,
-                    hasPrompter: names.contains(base + ".prompter.md")))
+                    hasPrompter: names.contains(base + ".prompter.md"),
+                    hasSidecar: info != nil,
+                    isCall: channels != nil))
             }
         }
         return out.sorted { $0.sortDate == $1.sortDate ? $0.base > $1.base : $0.sortDate > $1.sortDate }
@@ -176,6 +205,47 @@ public struct RecordingIndex {
         return groups.keys.sorted(by: >).map { ($0, groups[$0] ?? []) }
     }
 
+    /// Записи без сайдкара разметки: `ready` — аудио в архиве есть, можно разметить заново;
+    /// `noAudio` — размечать нечем (файл не найден), показать только счётчик. Записи звонков
+    /// (`isCall`) не кандидаты: их транскрипт подписан по каналам, диаризация его испортит.
+    public static func labelingCandidates(_ recordings: [Recording])
+        -> (ready: [Recording], noAudio: [Recording]) {
+        let fm = FileManager.default
+        var ready: [Recording] = []
+        var noAudio: [Recording] = []
+        for r in recordings where !r.hasSidecar && !r.isCall {
+            if let audio = r.audio, fm.fileExists(atPath: audio.path) {
+                ready.append(r)
+            } else {
+                noAudio.append(r)
+            }
+        }
+        return (ready, noAudio)
+    }
+
+    /// Аудиофайлы каталога архива по имени без расширения.
+    private static func audioByBase(in dir: URL) -> [String: URL] {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return [:] }
+        var out: [String: URL] = [:]
+        for f in files where audioExtensions.contains(f.pathExtension.lowercased()) {
+            out[f.deletingPathExtension().lastPathComponent] = f
+        }
+        return out
+    }
+
+    /// Сайдкары каналов звонка `<base>.channels.json` каталога архива по имени без суффикса (D14).
+    static func channelsByBase(in dir: URL) -> [String: ChannelsSidecar] {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return [:] }
+        var out: [String: ChannelsSidecar] = [:]
+        for f in files where f.lastPathComponent.hasSuffix(ChannelsSidecar.suffix) {
+            guard let data = try? Data(contentsOf: f), let sidecar = try? ChannelsSidecar.decode(data) else { continue }
+            out[String(f.lastPathComponent.dropLast(ChannelsSidecar.suffix.count))] = sidecar
+        }
+        return out
+    }
+
     // MARK: - Сайдкары
 
     private static func readMeta(_ url: URL) -> Meta? {
@@ -225,7 +295,7 @@ public struct RecordingIndex {
     private func speakersByKey() -> [String: SpeakerInfo] {
         guard let speakersRoot else { return [:] }
         var out: [String: SpeakerInfo] = [:]
-        for rec in SpeakerSidecarStore(root: speakersRoot).recent() {
+        for rec in SpeakerSidecarStore(root: speakersRoot).recent(includeRemoved: true) {
             let sidecar = rec.sidecar
             let names = sidecar.clusters
                 .filter { !$0.isCollapsed && ($0.assigned != nil || $0.isLong(minSpeech: sidecar.minSpeech)) }

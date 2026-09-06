@@ -49,7 +49,7 @@ struct MainView: View {
         switch model.section {
         case .overview: OverviewScreen(model: model)
         case .recordings: RecordingsScreen(model: model)
-        case .prompter: PrompterScreen()
+        case .prompter: PrompterScreen(model: model)
         case .voices: VoicesScreen(model: model)
         case .dictation: DictationScreen(model: model)
         case .phone: PhoneScreen(model: model)

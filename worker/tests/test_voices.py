@@ -435,6 +435,43 @@ def test_prepare_reuses_existing_transcript_folder(tmp_path):
     assert (spk.sidecar_dir(cfg, "2026-07", "rec") / spk.FILE_NAME).exists()
 
 
+def test_prepare_refuses_call_recording_with_channels_sidecar(tmp_path, capsys):
+    cfg = make_cfg(tmp_path)
+    audio = cfg.processed / "2026-09" / "2026-09-04_15-30-05.m4a"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"x")
+    audio.with_name("2026-09-04_15-30-05.channels.json").write_text(
+        '{"version":1,"call_id":"2026-09-04_15-30-05","channels":{"0":"Я","1":"Собеседник"}}', "utf-8")
+    assert voices.main(["prepare", str(audio)], cfg=cfg, diarizer=FakeDiarizer(),
+                       transcriber=FakeTranscriber()) == 2
+    assert "запись звонка" in capsys.readouterr().err
+    assert not cfg.output.exists() and not (cfg.service / "speakers").exists()
+
+
+def test_prepare_prefers_audio_month_when_base_repeats(tmp_path, capsys):
+    cfg = make_cfg(tmp_path)
+    for month in ("2026-06", "2026-08"):
+        t = cfg.output / month / "rec.txt"
+        t.parent.mkdir(parents=True)
+        t.write_text(f"старое {month}", "utf-8")
+    audio = cfg.processed / "2026-08" / "rec.m4a"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"x")
+    assert voices.main(["prepare", str(audio)], cfg=cfg, diarizer=FakeDiarizer(),
+                       transcriber=FakeTranscriber()) == 0
+    assert (cfg.output / "2026-08" / "rec.txt").read_text("utf-8").startswith("[00:00:00]")
+    assert (cfg.output / "2026-06" / "rec.txt").read_text("utf-8") == "старое 2026-06"
+    assert (spk.sidecar_dir(cfg, "2026-08", "rec") / spk.FILE_NAME).exists()
+    # Аудио из третьего месяца при двух транскриптах — отказ, а не молчаливый выбор.
+    other = cfg.processed / "2026-05" / "rec.m4a"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"x")
+    assert voices.main(["prepare", str(other)], cfg=cfg, diarizer=FakeDiarizer(),
+                       transcriber=FakeTranscriber()) == 2
+    assert "не знаю, какой перезаписывать" in capsys.readouterr().err
+    assert (cfg.output / "2026-06" / "rec.txt").read_text("utf-8") == "старое 2026-06"
+
+
 def test_prepare_period_fallback_and_missing_file(tmp_path, capsys):
     cfg = make_cfg(tmp_path)
     loose = tmp_path / "loose"
@@ -473,8 +510,9 @@ def test_forget_cli(tmp_path, capsys):
     path = _sidecar(tmp_path, cfg)
     assert voices.main(["forget", str(path.parent)], cfg=cfg) == 0
     assert "убрано из разметки: rec" in capsys.readouterr().out
-    assert not path.parent.exists() and (tmp_path / "rec.txt").exists()
-    assert voices.main(["forget", str(path)], cfg=cfg) == 2
+    assert spk.load(path)["removed"] == "forgotten" and (tmp_path / "rec.txt").exists()
+    assert voices.main(["forget", str(path)], cfg=cfg) == 0        # повтор безвреден
+    assert voices.main(["forget", str(tmp_path / "нет")], cfg=cfg) == 2
 
 
 # --- перенос разметки замера и пересчёт подсказок ---

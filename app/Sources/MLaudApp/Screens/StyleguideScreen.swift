@@ -91,6 +91,20 @@ struct StyleguideScreen: View {
                     NitiKeyValue("Тон", "danger", tone: Niti.Colors.danger)
                 }
             }
+            Panel("Уровни и таймер звонка") {
+                HStack(spacing: Niti.Spacing.s5) {
+                    NitiLevelMeter(level: 0, label: "тишина")
+                    NitiLevelMeter(level: 0.006, label: "порог")
+                    NitiLevelMeter(level: 0.05, label: "речь")
+                    NitiLevelMeter(level: 0.3, label: "громко")
+                    NitiLevelMeter(level: 1, label: "предел")
+                }
+                HStack(spacing: Niti.Spacing.s5) {
+                    NitiTimerLabel(seconds: 1122)
+                    NitiTimerLabel(seconds: 1122, plan: 3600)
+                    NitiTimerLabel(seconds: 3725, plan: 3600)
+                }
+            }
             Panel("Карточки и пустое состояние") {
                 NitiCard(selected: true) { Text("выбранная карточка").font(Niti.Typography.md) }
                 NitiCard(hoverable: true) { Text("карточка с hover").font(Niti.Typography.md) }

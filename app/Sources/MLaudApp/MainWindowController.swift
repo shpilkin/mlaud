@@ -81,6 +81,10 @@ enum MainMenu {
         main.addItem(submenu(appMenu))
 
         let file = NSMenu(title: "Файл")
+        // Этап 4 (§4.6): новый бриф ⌘N — только в разделе «Суфлёр» (валидация по секции).
+        let newBrief = NSMenuItem(title: "Новый бриф…", action: Selector(("newBriefMenu")), keyEquivalent: "n")
+        newBrief.target = delegate
+        file.addItem(newBrief)
         file.addItem(withTitle: "Закрыть", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         main.addItem(submenu(file))
 
@@ -104,11 +108,21 @@ enum MainMenu {
             view.addItem(item)
         }
         main.addItem(submenu(view))
+        // Этап 4 (§4.6): компактная панель ⌘⇧C.
+        main.addItem(NSMenuItem(title: "Компактный режим", action: Selector(("toggleCompactPanel")), keyEquivalent: "C"))
 
         let actions = NSMenu(title: "Действия")
-        let process = NSMenuItem(title: "Обработать сейчас", action: #selector(AppDelegate.processNow), keyEquivalent: "r")
+        // ⌘R контекстный (D5): заголовок и действие подставляет `AppDelegate.validateMenuItem`.
+        let process = NSMenuItem(title: "Обработать сейчас", action: #selector(AppDelegate.primaryAction), keyEquivalent: "r")
         process.target = delegate
         actions.addItem(process)
+        let call = NSMenuItem(title: "Суфлёр: начать звонок…", action: #selector(AppDelegate.startCallSetup), keyEquivalent: "")
+        call.target = delegate
+        actions.addItem(call)
+        // Этап 4 (§4.6): ⌘↩ валиден при идущем звонке; валидацию делает AppDelegate.
+        let hint = NSMenuItem(title: "Суфлёр: подсказать", action: Selector(("requestHint")), keyEquivalent: "\r")
+        hint.target = delegate
+        actions.addItem(hint)
         let dictation = NSMenuItem(title: "Диктовка: начать / закончить", action: #selector(AppDelegate.toggleDictation), keyEquivalent: "")
         dictation.target = delegate
         actions.addItem(dictation)

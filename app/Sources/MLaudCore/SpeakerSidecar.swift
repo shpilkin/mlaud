@@ -136,9 +136,12 @@ public struct SpeakerSidecar: Decodable, Sendable {
     public let minSpeech: Double
     public let clusters: [SpeakerCluster]
     public let clipsError: String?
+    /// Надгробие: `forgotten` («Убрать из списка») или `swept` (ретенция) — клипов и
+    /// векторов нет, имена остались. В «Голосах» не показывается, в «Записях» — говорящие есть.
+    public let removed: String?
 
     enum CodingKeys: String, CodingKey {
-        case version, source, base, period, txt, srt, threshold, clusters
+        case version, source, base, period, txt, srt, threshold, clusters, removed
         case processedAt = "processed_at"
         case durationSec = "duration_sec"
         case minSpeech = "min_speech"
@@ -166,11 +169,14 @@ public struct SpeakerSidecar: Decodable, Sendable {
         minSpeech = try c.decodeIfPresent(Double.self, forKey: .minSpeech) ?? 30
         clusters = try c.decodeIfPresent([SpeakerCluster].self, forKey: .clusters) ?? []
         clipsError = try c.decodeIfPresent(String.self, forKey: .clipsError)
+        removed = try c.decodeIfPresent(String.self, forKey: .removed)
     }
 
-    /// Сколько кластеров ждут разметки.
+    public var isRemoved: Bool { removed != nil }
+
+    /// Сколько кластеров ждут разметки; у надгробия — ноль.
     public var pendingCount: Int {
-        clusters.filter { $0.needsAttention(minSpeech: minSpeech) }.count
+        isRemoved ? 0 : clusters.filter { $0.needsAttention(minSpeech: minSpeech) }.count
     }
 
     /// Есть ли вообще кому ставить имя: кластеры с речью не короче порога и с вектором.
@@ -207,8 +213,8 @@ public struct SpeakerSidecarStore {
     }
 
     /// Все записи, новые сверху. Битые файлы пропускаются: одна испорченная запись
-    /// не должна прятать остальные.
-    public func recent() -> [SpeakerRecording] {
+    /// не должна прятать остальные. Надгробия — только по просьбе (индекс «Записей»).
+    public func recent(includeRemoved: Bool = false) -> [SpeakerRecording] {
         let fm = FileManager.default
         guard let periods = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
         else { return [] }
@@ -218,7 +224,8 @@ public struct SpeakerSidecarStore {
             else { continue }
             for rec in recs {
                 let url = rec.appendingPathComponent(Self.fileName)
-                guard let sidecar = try? SpeakerSidecar.load(url) else { continue }
+                guard let sidecar = try? SpeakerSidecar.load(url),
+                      includeRemoved || !sidecar.isRemoved else { continue }
                 let mtime = (try? fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date)
                     ?? .distantPast
                 out.append(SpeakerRecording(url: url, sidecar: sidecar,

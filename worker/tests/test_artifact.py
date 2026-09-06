@@ -161,3 +161,52 @@ def test_file_duration_beats_the_last_segment(tmp_path):
         duration_sec=1400,  # «конец последнего сегмента» врёт в большую сторону
     )
     assert payload["duration_sec"] == 828
+
+
+# --- запись звонка Суфлёра (этап 3) ---
+
+
+def test_build_payload_started_at_override_marks_source_sidecar(tmp_path):
+    audio = _mvhd_m4a(tmp_path / "rec.m4a", datetime(2026, 8, 16, 11, 30, tzinfo=UTC), 2820)
+    txt = tmp_path / "rec.txt"
+    txt.write_text("текст", encoding="utf-8")
+    call_started = datetime(2026, 9, 4, 15, 30, 5).astimezone()
+    payload = artifact.build_payload(
+        audio_path=audio, txt_path=txt, srt_path=None, asr_root=tmp_path,
+        started_at=call_started,
+    )
+    assert payload["started_at_source"] == "sidecar"
+    assert payload["started_at"] == call_started.isoformat()
+    assert payload["started_at"].startswith("2026-09-04T15:30:05")
+    assert payload["duration_sec"] == 2820             # длительность по-прежнему из файла
+    assert list(payload)[:3] == ["meeting_id", "started_at", "started_at_source"]
+
+
+def test_prompter_block_relative_path_and_nulls(tmp_path):
+    outcome = tmp_path / "ASROutput" / "2026-09" / "2026-09-04_15-30-05.prompter.md"
+    block = artifact.prompter_block(
+        call_id="2026-09-04_15-30-05", brief=None, goal=None,
+        outcome_path=outcome, asr_root=tmp_path,
+    )
+    assert block == {
+        "call_id": "2026-09-04_15-30-05", "brief": None, "goal": None,
+        "outcome_path": "ASROutput/2026-09/2026-09-04_15-30-05.prompter.md",
+    }
+    assert list(block) == ["call_id", "brief", "goal", "outcome_path"]
+    none = artifact.prompter_block(call_id="x", brief="бриф", goal=None,
+                                   outcome_path=None, asr_root=tmp_path)
+    assert none["outcome_path"] is None and none["brief"] == "бриф"
+
+
+def test_build_payload_adds_prompter_only_when_given(tmp_path):
+    payload, _ = _payload(tmp_path)
+    assert "prompter" not in payload
+    block = {"call_id": "c", "brief": None, "goal": None, "outcome_path": None}
+    audio = _mvhd_m4a(tmp_path / "rec2.m4a", datetime(2026, 8, 16, 11, 30, tzinfo=UTC), 10)
+    txt = tmp_path / "rec2.txt"
+    txt.write_text("т", encoding="utf-8")
+    with_block = artifact.build_payload(
+        audio_path=audio, txt_path=txt, srt_path=None, asr_root=tmp_path, prompter=block,
+    )
+    assert with_block["prompter"] == block
+    assert list(with_block)[-1] == "prompter"

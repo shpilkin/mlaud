@@ -13,11 +13,20 @@ let app = NSApplication.shared
 
 // Дымовая проверка окна «Голоса» без UI-автоматизации (ей нужен «Универсальный доступ»):
 // MLaudApp --smoke-voices <каталог speakers> <python> <каталог worker> <база голосов>
+//   [<каталог результатов> <архив аудио>] — с двумя последними проверяется и
+//   «Разметить всё без сайдкара».
 if let i = CommandLine.arguments.firstIndex(of: "--smoke-voices"),
    CommandLine.arguments.count > i + 4 {
     let a = CommandLine.arguments
+    // Пять хвостовых аргументов — забыт архив: молча пропустить массовую разметку нельзя.
+    guard a.count != i + 6 else {
+        FileHandle.standardError.write(Data(("--smoke-voices: нужны 4 или 6 аргументов "
+            + "(<speakers> <python> <worker> <база голосов> [<результаты> <архив аудио>])\n").utf8))
+        exit(64)
+    }
+    let archive = a.count > i + 6 ? (outputs: a[i + 5], archive: a[i + 6]) : nil
     exit(VoicesSmoke.run(speakersRoot: a[i + 1], python: a[i + 2],
-                         workerDir: a[i + 3], voicesDir: a[i + 4]))
+                         workerDir: a[i + 3], voicesDir: a[i + 4], archive: archive))
 }
 
 // Снимки экранов главного окна для проверки вида: MLaudApp --screenshot <каталог>.

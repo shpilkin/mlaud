@@ -46,5 +46,22 @@ recording("old", "2026-09-01T10:00:00+00:00", "Милана Г")
 (root / "voices").mkdir()
 PY
 
+# Архив под «Разметить всё без сайдкара»: у «legacy» транскрипт и аудио (синтез речи),
+# у «noaudio» — только транскрипт, размечать нечем; «dup» лежит в двух месяцах с разным
+# аудио — каждый месяц должен получить свой сайдкар и свой транскрипт.
+outputs="$root/AllOutputs"
+archive="$root/Processed/AllRecords"
+mkdir -p "$outputs/2026-08" "$outputs/2026-07" "$outputs/2026-06" "$archive/2026-08" "$archive/2026-06"
+printf 'старый транскрипт\n' > "$outputs/2026-08/legacy.txt"
+printf 'старый транскрипт\n' > "$outputs/2026-07/noaudio.txt"
+printf 'старый транскрипт июня\n' > "$outputs/2026-06/dup.txt"
+printf 'старый транскрипт августа\n' > "$outputs/2026-08/dup.txt"
+say -v Milena -o "$archive/2026-08/legacy.m4a" --data-format=aac \
+    "Привет, это старая запись без сайдкара. Сейчас её разметят заново и подпишут голоса."
+say -v Milena -o "$archive/2026-06/dup.m4a" --data-format=aac \
+    "Это июньская запись с тем же именем файла, что и августовская."
+say -v Milena -o "$archive/2026-08/dup.m4a" --data-format=aac \
+    "А это августовская запись, у неё своё аудио и свой транскрипт."
+
 swift run MLaudApp --smoke-voices "$root/service/speakers" "${MLAUD_PY:-../poc/.venv/bin/python}" \
-    "${MLAUD_WORKER_DIR:-../worker}" "$root/voices"
+    "${MLAUD_WORKER_DIR:-../worker}" "$root/voices" "$outputs" "$archive"

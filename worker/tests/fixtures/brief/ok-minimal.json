@@ -1,0 +1,14 @@
+{
+  "title": "Короткий звонок",
+  "template": "custom",
+  "mode": "vks",
+  "expected_min": 60,
+  "counterpart": "",
+  "goal": "",
+  "agenda": [],
+  "prompter": false,
+  "model": "default",
+  "sections": {},
+  "extra": [],
+  "extra_sections": []
+}

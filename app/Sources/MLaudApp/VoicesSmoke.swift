@@ -6,14 +6,25 @@ import SwiftUI
 /// Дымовая проверка раздела «Голоса» из командной строки (см. main.swift): реальный сайдкар,
 /// реальный worker, экран собирается на этих данных без показа окна.
 enum VoicesSmoke {
+    /// `archive` — каталог результатов и архив аудио: с ними после основных проверок гонится
+    /// «Разметить всё без сайдкара» (реальные модели, минута-другая).
     static func run(speakersRoot: String, python: String, workerDir: String,
-                    voicesDir: String) -> Int32 {
+                    voicesDir: String, archive: (outputs: String, archive: String)?) -> Int32 {
         setlinebuf(stdout)   // вывод в пайп — построчно, иначе при зависании не видно, где
         let root = URL(fileURLWithPath: speakersRoot)
         let store = SpeakerSidecarStore(root: root)
         let pythonURL = URL(fileURLWithPath: python).standardizedFileURL
         let workerURL = URL(fileURLWithPath: workerDir, isDirectory: true).standardizedFileURL
         print("python: \(pythonURL.path) · worker: \(workerURL.path) · cwd: \(FileManager.default.currentDirectoryPath)")
+        // Worker пишет только во временный корень: сайдкары, база, результаты, архив.
+        // Модели — из локального кеша HF, без сети.
+        var environment = ["MLAUD_VOICES_DIR": voicesDir,
+                           "MLAUD_SERVICE": root.deletingLastPathComponent().path,
+                           "HF_HUB_OFFLINE": "1"]
+        if let archive {
+            environment["MLAUD_OUTPUT"] = archive.outputs
+            environment["MLAUD_PROCESSED"] = archive.archive
+        }
         let runner = VoicesRunner(
             makeCommand: { args in
                 WorkerCommand(
@@ -23,8 +34,7 @@ enum VoicesSmoke {
                     // Для бандла: site-packages лежат отдельно от worker'а.
                     additionalPythonPath: (ProcessInfo.processInfo.environment["PYTHONPATH"] ?? "")
                         .split(separator: ":").map { URL(fileURLWithPath: String($0)) },
-                    extraEnvironment: ["MLAUD_VOICES_DIR": voicesDir,
-                                       "MLAUD_SERVICE": root.deletingLastPathComponent().path],
+                    extraEnvironment: environment,
                     module: "mlaud_worker.voices",
                     moduleArguments: args)
             },
@@ -74,7 +84,57 @@ enum VoicesSmoke {
               + (recordings.count > 1 ? "" : " (в каталоге одна запись)"))
         let ok = changes == 1 && errors.isEmpty && !after.contains("busy=true")
             && after.contains("pending=0") && renderedSize != nil && revealOK && crossOK
-        return ok ? 0 : 1
+        guard ok else { return 1 }
+        guard let archive else { return 0 }
+        return bulkPrepare(voices, speakersRoot: root, outputs: archive.outputs, archive: archive.archive,
+                           changes: { changes }, errors: { errors }) ? 0 : 1
+    }
+
+    /// «Разметить всё без сайдкара»: кандидаты из индекса архива, подтверждение — печатью,
+    /// очередь до конца, затем сайдкар, перезаписанный транскрипт и пустой список кандидатов.
+    private static func bulkPrepare(_ voices: VoicesModel, speakersRoot: URL, outputs: String, archive: String,
+                                    changes: () -> Int, errors: () -> [String]) -> Bool {
+        let index = RecordingIndex(root: URL(fileURLWithPath: outputs, isDirectory: true),
+                                   speakersRoot: speakersRoot,
+                                   archiveRoot: URL(fileURLWithPath: archive, isDirectory: true))
+        voices.setArchive(index.scan())
+        let ready = voices.readyCandidates, noAudio = voices.noAudioCandidates
+        print("кандидаты: готовы=\(ready.count) без аудио=\(noAudio.count)")
+        for r in ready { print("  готова: \(r.period)/\(r.base) ← \(r.audio?.lastPathComponent ?? "-")") }
+        for r in noAudio { print("  без аудио: \(r.period)/\(r.base)") }
+        let renderedSize = MainActor.assumeIsolated { render(voices) }
+        print("экран с кандидатами отрисован: \(renderedSize.map { "\(Int($0.width))×\(Int($0.height))" } ?? "нет")")
+        guard !ready.isEmpty, renderedSize != nil else { return false }
+
+        let textsBefore = ready.map { (try? String(contentsOf: $0.txt, encoding: .utf8)) ?? "" }
+        let changesBefore = changes()
+        voices.confirm = { title, message, button in
+            print("подтверждение: «\(title)» [\(button)]")
+            for line in message.split(separator: "\n") { print("  \(line)") }
+            return true
+        }
+        voices.prepareAllWithoutSidecar()
+        print("запущено: preparing=\(voices.isPreparing) status=«\(voices.status)»")
+        let deadline = Date(timeIntervalSinceNow: 300)
+        while voices.isPreparing, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))
+        }
+        print("итог: preparing=\(voices.isPreparing) status=«\(voices.status)» onChange=\(changes())")
+
+        var checks: [(String, Bool)] = []
+        for (i, r) in ready.enumerated() {
+            let sidecar = speakersRoot.appendingPathComponent("\(r.period)/\(r.base)/speakers.json")
+            checks.append(("сайдкар \(r.period)/\(r.base)", FileManager.default.fileExists(atPath: sidecar.path)))
+            let text = (try? String(contentsOf: r.txt, encoding: .utf8)) ?? ""
+            checks.append(("транскрипт \(r.base) перезаписан", !text.isEmpty && text != textsBefore[i]))
+        }
+        checks.append(("очередь завершена (prepareProgress == nil)", !voices.isPreparing))
+        checks.append(("ошибок worker'а нет", errors().isEmpty))
+        checks.append(("onChange вызван снова", changes() > changesBefore))
+        voices.setArchive(index.scan())
+        checks.append(("после пересканирования готовых кандидатов нет", voices.readyCandidates.isEmpty))
+        for (name, passed) in checks { print("\(passed ? "ok  " : "FAIL") \(name)") }
+        return checks.allSatisfy(\.1)
     }
 
     @MainActor

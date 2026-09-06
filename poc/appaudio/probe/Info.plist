@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>ru.mlaud.appaudio-probe</string>
+    <key>CFBundleName</key><string>AppAudioProbe</string>
+    <key>CFBundleExecutable</key><string>Probe</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleVersion</key><string>BUILD_NUMBER</string>
+    <key>CFBundleShortVersionString</key><string>0.1</string>
+    <key>LSMinimumSystemVersion</key><string>15.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSAudioCaptureUsageDescription</key><string>Проба S2: звук приложения звонка для суфлёра.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Проба S2: эхо динамиков в микрофоне.</string>
+</dict>
+</plist>
