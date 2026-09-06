@@ -571,7 +571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.selfVoiceReady = false
             return
         }
-        model.selfVoiceReady = people["Я"] != nil
+        model.selfVoiceReady = people.keys.contains { $0.lowercased() == "я" }
     }
 
     private var selfVoiceCapture: AudioCapture?
@@ -1136,6 +1136,7 @@ extension AppDelegate: AppCommands {
     @objc func startCallSetup() {
         openMainWindow()
         model.section = .prompter
+        if !previewOnly { refreshSelfVoice() }
         guard let controller = callController() else { return }
         // «Начать звонок…» из меню при показанном итоге прошлого звонка — закрыть его и готовить новый.
         if controller.session.snapshot.phase == .done {

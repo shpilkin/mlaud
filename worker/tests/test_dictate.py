@@ -530,12 +530,12 @@ def test_open_voice_without_self_person_is_error():
     """Флаг есть, персоны «Я» в базе нет — ошибка каналом, сессия не создаётся."""
     reg = _voice_registry({"me": FakeDecoder({})}, loader=lambda: None)
     events = reg.handle({"t": "open", "ch": "me", "label": "Я", "voice": True})
-    assert events and events[0]["t"] == "error" and "«Я»" in events[0]["message"]
+    assert events and events[0]["t"] == "error" and "«я»" in events[0]["message"]
     assert events[0]["ch"] == "me"
 
 
 def test_voice_loader_called_once():
-    """Модель грузится один раз на процесс, не на каждый open."""
+    """Успешно загруженный маркер кешируется: один вызов на процесс."""
     calls = []
     reg = _voice_registry({"me": FakeDecoder({}), "them": FakeDecoder({})},
                           loader=lambda: calls.append(1) or FakeVoice())
@@ -544,6 +544,20 @@ def test_voice_loader_called_once():
     reg.handle({"t": "close", "ch": "me"})
     reg.handle({"t": "open", "ch": "me", "label": "Я", "voice": True})
     assert len(calls) == 1
+
+
+def test_voice_absence_not_cached_forever():
+    """Эталона нет → ошибка; записали его → следующий voice-open подхватывает
+    без перезапуска распознавателя."""
+    have = False
+    def loader():
+        return FakeVoice() if have else None
+    reg = _voice_registry({"me": FakeDecoder({})}, loader=loader)
+    errors = reg.handle({"t": "open", "ch": "me", "label": "Я", "voice": True})
+    assert errors and errors[0]["t"] == "error"
+    reg.handle({"t": "close", "ch": "me"})
+    have = True
+    assert reg.handle({"t": "open", "ch": "me", "label": "Я", "voice": True}) == []
 
 
 def test_live_voice_marks_do_not_touch_base(tmp_path):

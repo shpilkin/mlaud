@@ -299,16 +299,18 @@ class ChannelRegistry:
         self._sessions: dict[str, DictationSession] = {}
 
     def _voice_for(self, ch, want: bool):
-        """Маркер канала: без флага — None; с флагом — живой маркер или ошибка."""
+        """Маркер канала: без флага — None; с флагом — живой маркер или ошибка.
+        Успешно загруженный маркер кешируется; «эталона нет» НЕ кешируется — запись
+        эталона между звонками подхватывается следующим open без перезапуска."""
         if not want:
             return None, []
         if self._voice is ...:
-            if self._voice_loader is None:
-                self._voice = None
-            else:
-                self._voice = self._voice_loader()
+            self._voice = self._voice_loader() if self._voice_loader else None
+        elif self._voice is None:
+            retry = self._voice_loader() if self._voice_loader else None
+            self._voice = retry
         if self._voice is None:
-            return None, [self._error(ch, "нет персоны «Я» в базе голосов — живые пометки выключены (запишите голос в «Голосах»)")]
+            return None, [self._error(ch, "нет персоны «я» в базе голосов — живые пометки выключены (запишите голос в «Голосах» перед звонком)")]
         return self._voice, []
 
     def session(self, ch: Optional[str]) -> DictationSession:

@@ -122,6 +122,10 @@ struct CallScreen: View {
         if call.phase == .ready || (call.phase == .running && call.elapsed < 60) {
             NitiBanner(CallConsent.line, tone: .info, systemImage: "record.circle")
         }
+        if call.mode == "offline", !model.selfVoiceReady {
+            NitiBanner("Живая пометка «Я / не я» выключена: в базе голосов нет персоны «я» — все реплики будут «Я». Эталон записывается до звонка (30 с).",
+                       tone: .warn, systemImage: "person.crop.circle.badge.exclamationmark")
+        }
         prompterBanners
     }
 

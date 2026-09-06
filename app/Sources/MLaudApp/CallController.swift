@@ -279,6 +279,7 @@ final class CallController {
 
         var record = CallRecord(callID: callID, startedAt: startedAt, model: deps.modelType(),
                                 channels: isOffline ? [CallChannel.me.key: "Я"] : (sidecar?.channels ?? [:]))
+        record.mode = isOffline ? "offline" : "vks"
         record.brief = briefInfo?.brief.title
         record.briefDir = briefInfo?.slug
         record.inputDevice = session.snapshot.inputDeviceName

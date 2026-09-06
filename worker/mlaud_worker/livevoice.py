@@ -48,12 +48,20 @@ class LiveVoice:
         return {"self": score >= self.threshold, "score": round(score, 2)}
 
 
+def self_centroid(gallery: dict) -> Optional[np.ndarray]:
+    """Центроид персоны «я» без учёта регистра: в базе бывает «я» с маленькой
+    (заведена вручную до этапа 5); новые записи всегда канонические «Я»."""
+    for name, vec in gallery.items():
+        if name.lower() == SELF_NAME.lower():
+            return vec
+    return None
+
+
 def load(voices_dir: Path) -> Optional[LiveVoice]:
     """Живой маркер из базы голосов: центроид персоны «Я»; персоны нет — None."""
     from .voices import VoiceStore
 
-    gallery = VoiceStore(voices_dir).gallery()
-    centroid = gallery.get(SELF_NAME)
+    centroid = self_centroid(VoiceStore(voices_dir).gallery())
     if centroid is None:
         return None
     return LiveVoice(_cpu_embedder(), centroid)

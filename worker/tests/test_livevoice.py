@@ -76,6 +76,23 @@ def test_load_without_self_person_returns_none(tmp_path):
     assert livevoice.load(tmp_path) is None
 
 
+def test_self_lookup_is_case_insensitive(tmp_path, monkeypatch):
+    """В базе «я» с маленькой (заведена вручную до этапа 5) — маркер строится."""
+    from mlaud_worker.voices import VoiceStore
+
+    monkeypatch.setattr(livevoice, "_cpu_embedder", lambda: (lambda samples: np.zeros(8)))
+    vec = np.zeros(8, dtype=np.float32)
+    vec[0] = 1.0
+    store = VoiceStore(tmp_path)
+    store.add("я", vec, source_file="old.m4a", label="SPEAKER_00", speech_sec=1200.0,
+              channel="phone")
+    assert livevoice.load(tmp_path) is not None
+    # и каноническое «Я» тоже находится
+    store.add("Я", vec, source_file="ref.wav", label="SPEAKER_00", speech_sec=30.0,
+              channel="reference")
+    assert livevoice.load(tmp_path) is not None
+
+
 def test_load_with_self_person_builds_marker(tmp_path, monkeypatch):
     """Маркер из базы: персоны нет — None; есть «Я» — маркер (эмуляция эмбеддера:
     torch живёт в venv распознавателя, в тестовом — подмена)."""
