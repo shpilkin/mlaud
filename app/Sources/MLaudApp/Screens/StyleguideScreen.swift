@@ -3,6 +3,18 @@ import SwiftUI
 
 /// Витрина токенов и компонентов. Правило Niti: добавил компонент — добавь сюда.
 /// Тема — системная; вторая тема снимается режимом `--screenshot`.
+private func cardText(_ type: String) -> String {
+    switch type {
+    case "answer": return "Ответить: метрика выросла втрое за квартал"
+    case "ask": return "Спросить: сколько человек в команде сейчас"
+    case "fact": return "В резюме: 6 лет системным аналитиком"
+    case "next_step": return "Договориться о следующем шаге с датой"
+    case "off_route": return "Ушли с повестки: вернуть к кейсу"
+    case "tension": return "Возражение по срокам: предложить этапы"
+    default: return "Половина времени. Не начаты: кейс-задача"
+    }
+}
+
 struct StyleguideScreen: View {
     @State private var tab = "one"
     @State private var field = ""
@@ -55,6 +67,18 @@ struct StyleguideScreen: View {
                     NitiChip(systemName: "arrow.right.circle", tone: .success)
                     NitiChip(systemName: "arrow.uturn.left", tone: .warning)
                     NitiChip(systemName: "exclamationmark.triangle", tone: .danger)
+                }
+            }
+            Panel("Карточки подсказок") {
+                // По одной каждого типа — ux-app.md §2.3; закрепление/убирание по hover.
+                ForEach(["answer", "ask", "fact", "next_step", "off_route", "tension", "time"], id: \.self) { type in
+                    NitiPromptCard(type: type,
+                                   text: cardText(type),
+                                   source: type == "fact" ? "резюме.pdf" : nil,
+                                   pinned: type == "answer",
+                                   highlighted: false,
+                                   detail: type == "fact" ? "Раскрытие по клику: 2–4 предложения с конкретикой." : nil,
+                                   onPin: {}, onDismiss: {}, onCopy: {}, onTap: {})
                 }
             }
             Panel("Баннеры и тост") {

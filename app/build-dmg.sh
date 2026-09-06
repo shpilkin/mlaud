@@ -11,7 +11,7 @@ REPO=".."
 APP_NAME="MLaud"
 EXE_NAME="MLaudApp"
 BUNDLE_ID="com.mlaud.app"
-VERSION="0.11.0"
+VERSION="0.12.0"
 
 VENV="$REPO/poc/.venv"
 SITE="$VENV/lib/python3.12/site-packages"
@@ -68,7 +68,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSMicrophoneUsageDescription</key><string>Микрофон нужен для диктовки по ⌃⌥D: речь превращается в текст локально, на этом компьютере.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Микрофон нужен для диктовки по ⌃⌥D и звонков Суфлёра: речь превращается в текст локально, на этом компьютере.</string>
     <key>NSLocalNetworkUsageDescription</key><string>Локальная сеть нужна, чтобы принимать записи с твоего iPhone напрямую: файлы идут на этот компьютер, минуя интернет.</string>
 </dict>
 </plist>

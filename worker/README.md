@@ -180,17 +180,52 @@ worker трактует одинаково. Ключи каналов — стр
 стерео-записи звонка продолжит сводить каналы в моно и диаризовать — подписи «Я»/«Собеседник»
 он не восстанавливает.
 
+## Подсказчик (`mlaud_worker.prompter`) — резидентный и одноразовые режимы
+
+Один звонок = одна беседа с моделью: системный промт (роль → профиль → бриф → дополнение
+шаблона → материалы → схема) строго первым и не меняется; каждый ход — новым user-сообщением
+с репликами с прошлого хода. Дебаунс 2.5 с, копление на время полёта, лимит запросов в
+минуту и потолок стоимости — внутри (FR-12.14); карточки идут стримом по мере закрытия
+объектов. Файлы звонка (в `~/ASR/Prompter/calls/<id>/`, корень переопределяется
+`MLAUD_PROMPTER_DIR`): `cards.jsonl`, `outcome.json`, `outcome.md`, `prompter.log.jsonl`
+пишет Python; ключ — только переменной `MLAUD_LLM_KEY`, никогда аргументом и не в логах
+(`logutil.redact` маскирует `Bearer …` и `sk-…`).
+
+Транспорт как у диктовки: JSON-строки в обе стороны (`json.dumps(ensure_ascii=False)+"\n"`
++ flush), stdin читается всегда — `finish`/`quit` не ждут летящего запроса. Команды:
+`start` (один раз; connection как в start, limits), `turn` (reason
+`them_phrase|manual|timer`, lines — новые строки обоих каналов с прошлого хода),
+`pause`, `detail` (вне истории беседы), `finish`, `quit`. События: `ready`, `warm`,
+`card`/`cards`, `detail`, `waiting` (rpm), `paused` (потолок), `outcome`, `error`
+(fatal — суфлёр выключен, транскрипт и запись живут). Точный порядок ключей — фикстуры
+`tests/fixtures/protocol/{commands,events}.jsonl`.
+
+После звонка: конвейер (`pipeline.process_file`) для записи с сайдкаром копирует
+`outcome.md` из папки звонка в `ASROutput/AllOutputs/<мес>/<id>.prompter.md`, доставляет
+в Telegram после транскрипта и пишет `goal` из брифа в блок `prompter` артефакта; итоги
+опоздали — `outcome_path: null`. Повтор/опоздавшие итоги — руками:
+
+```bash
+echo '{"connection":{"base_url":"…","model":"…","reasoning":null,"price_per_mtok":{}}}' \
+  | MLAUD_LLM_KEY=sk-… .venv/bin/python -m mlaud_worker.prompter --check   # {"ok":true,"ttft_ms":…}; отказ → exit 1, нет ключа → 2
+.venv/bin/python -m mlaud_worker.prompter --materials <папка брифа>/materials [--budget 120000]
+.venv/bin/python -m mlaud_worker.telegram send <путь>/outcome.md [--caption ТЕКСТ]
+```
+
+Зависимости: `httpx>=0.28,<1`, `pypdf>=5,<7` (в `requirements.txt`, ставятся в оба venv).
+
 ## Тесты
 
 ```bash
 .venv/bin/python -m pytest -q
 ```
 
-183 теста (декодирование+регрессия ресемплинга, форматирование, Telegram-мок, конвейер,
-идемпотентность, диаризация, база голосов, протокол диктовки и каналов, сайдкар каналов).
-Тест end-to-end использует реальную запись `../test data/Пример записи.m4a`, регрессия
-узнавания — данные замера `~/ASR/spkid-eval` (оба пропускаются, если данных нет);
-`test_channels_real_model_end_to_end` синтезирует две фразы через `say -v Milena` и гонит их
-через настоящую модель. Быстрый прогон без моделей:
+268 тестов (декодирование+регрессия ресемплинга, форматирование, Telegram-мок, конвейер,
+идемпотентность, диаризация, база голосов, протокол диктовки и каналов, сайдкар каналов,
+подсказчик: бриф/материалы/промты/итоги/провайдер на MockTransport/оркестратор/сквозной
+прогон с подставной моделью). Тест end-to-end использует реальную запись
+`../test data/Пример записи.m4a`, регрессия узнавания — данные замера `~/ASR/spkid-eval`
+(оба пропускаются, если данных нет); `test_channels_real_model_end_to_end` синтезирует
+две фразы через `say -v Milena` и гонит их через настоящую модель. Быстрый прогон без моделей:
 `.venv/bin/python -m pytest -q tests -k "not end_to_end and not real_model"`. Гонять стоит в обоих venv: `.venv` (numpy 2) и
 `../poc/.venv` (стек бандла, numpy 1.26, pyannote).
