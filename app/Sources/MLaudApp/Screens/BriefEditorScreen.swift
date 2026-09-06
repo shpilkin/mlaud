@@ -9,7 +9,8 @@ struct BriefEditorScreen: View {
     @State private var saveWork: DispatchWorkItem?
 
     var body: some View {
-        Screen(model.editingBrief?.title.isEmpty == false ? model.editingBrief!.title : "Бриф") {
+        Screen(model.editingBrief?.title.isEmpty == false ? model.editingBrief!.title : "Бриф",
+               leading: { BackButton(label: "Суфлёр") { model.prompterView = .list } }) {
             if let brief = Binding($model.editingBrief) {
                 briefForm(brief)
             } else {

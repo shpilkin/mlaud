@@ -11,7 +11,8 @@ struct CallScreen: View {
     private var call: CallSnapshot { model.call }
 
     var body: some View {
-        Screen(call.title, scrolls: false) {
+        Screen(call.title, scrolls: false,
+               leading: { backArrow }) {
             toolbar
             banners
             phaseContent
@@ -20,6 +21,17 @@ struct CallScreen: View {
         } trailing: {
             NitiTimerLabel(seconds: call.elapsed, plan: nil)
             primaryButton
+        }
+    }
+
+    /// Стрелка «назад» слева от заголовка: есть, пока звонок можно отменить без потерь
+    /// (готов и итог); в разговоре и конвертации — нет, там путь назад только через «Стоп».
+    @ViewBuilder
+    private var backArrow: some View {
+        if call.phase == .ready {
+            BackButton(label: "Суфлёр") { model.commands?.dismissCall() }
+        } else if call.phase == .done {
+            BackButton(label: "Суфлёр") { model.commands?.dismissCall() }
         }
     }
 

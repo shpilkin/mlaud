@@ -12,7 +12,7 @@ struct OutcomeScreen: View {
     @State private var outcome: CallOutcome?
 
     var body: some View {
-        Screen("Итоги: \(record?.brief ?? callID)") {
+        Screen("Итоги", leading: { BackButton(label: "Суфлёр") { model.prompterView = .list } }) {
             if let outcome {
                 editor(outcome)
             } else {
@@ -30,8 +30,6 @@ struct OutcomeScreen: View {
             Button("Скопировать") { model.commands?.copyOutcome(callID: callID) }
                 .buttonStyle(.niti(.plain, size: .small))
             Button("Папка звонка") { model.commands?.openCallFolder(callID) }
-                .buttonStyle(.niti(.plain, size: .small))
-            Button("К списку") { model.prompterView = .list }
                 .buttonStyle(.niti(.plain, size: .small))
         }
         .onAppear {

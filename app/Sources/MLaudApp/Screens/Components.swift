@@ -40,16 +40,20 @@ extension OverviewState.Tone {
 /// Каркас экрана: заголовок с действиями справа, содержимое с отступами Niti. По умолчанию
 /// содержимое прокручивается целиком; `scrolls: false` — для экранов со своими списками
 /// («Голоса»: записи слева, карточки справа), которым нужна вся высота.
-struct Screen<Content: View, Trailing: View>: View {
+struct Screen<Leading: View, Content: View, Trailing: View>: View {
     private let title: String
     private let scrolls: Bool
+    private let leading: Leading
     private let trailing: Trailing
     private let content: Content
 
-    init(_ title: String, scrolls: Bool = true, @ViewBuilder content: () -> Content,
+    init(_ title: String, scrolls: Bool = true,
+         @ViewBuilder leading: () -> Leading = { EmptyView() },
+         @ViewBuilder content: () -> Content,
          @ViewBuilder trailing: () -> Trailing) {
         self.title = title
         self.scrolls = scrolls
+        self.leading = leading()
         self.content = content()
         self.trailing = trailing()
     }
@@ -57,10 +61,12 @@ struct Screen<Content: View, Trailing: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: Niti.Spacing.s3) {
+                leading
                 Text(title)
                     .font(Niti.Typography.xl)
                     .fontWeight(Niti.Weight.semibold)
                     .foregroundStyle(Niti.Colors.text)
+                    .lineLimit(1)
                 Spacer()
                 trailing
             }
@@ -91,8 +97,9 @@ struct Screen<Content: View, Trailing: View>: View {
 }
 
 extension Screen where Trailing == EmptyView {
-    init(_ title: String, scrolls: Bool = true, @ViewBuilder content: () -> Content) {
-        self.init(title, scrolls: scrolls, content: content) { EmptyView() }
+    init(_ title: String, scrolls: Bool = true, @ViewBuilder leading: () -> Leading = { EmptyView() },
+         @ViewBuilder content: () -> Content) {
+        self.init(title, scrolls: scrolls, leading: leading, content: content) { EmptyView() }
     }
 }
 
@@ -189,5 +196,28 @@ enum Format {
         let names = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август",
                      "сентябрь", "октябрь", "ноябрь", "декабрь"]
         return "\(names[month - 1]) \(year)"
+    }
+}
+
+
+/// Стрелка «назад» слева от заголовка: возврат к списку раздела («Суфлёр» без браузерных
+/// крошек — единственный очевидный путь назад, UX §4.3).
+struct BackButton: View {
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Niti.Spacing.s1) {
+                Image(systemName: "chevron.left")
+                    .font(Niti.Typography.base.weight(.semibold))
+                Text(label)
+                    .font(Niti.Typography.base)
+            }
+            .foregroundStyle(Niti.Colors.accent)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Вернуться к списку")
     }
 }
