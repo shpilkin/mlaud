@@ -31,7 +31,7 @@ import numpy as np
 
 from . import channels, spkid
 
-CHANNELS = ("phone", "vks", "other")
+CHANNELS = ("phone", "vks", "other", "reference")
 
 
 def _now() -> str:
@@ -310,6 +310,46 @@ def cmd_enroll(args, ctx: Context) -> int:
         return 1
     print(f"образец {sid}: «{args.name.strip()}» ← {display} ({raw}), {speech:.0f} c речи, "
           f"канал {args.channel}, из {audio.name}")
+    return 0
+
+
+def cmd_enroll_reference(args, ctx: Context) -> int:
+    """Эталонная запись одного человека → база под именем «Я» (FR-8.5, этап 5).
+
+    Запись чистая: берётся самый длинный кластер диаризации; речи меньше минимума —
+    отказ (короткий сэмпл испортит отпечаток, FR-8.9)."""
+    from . import livevoice
+    from .diarize import relabel, speech_seconds
+
+    cfg, store = ctx.cfg, ctx.store
+    audio = Path(args.audio)
+    if not audio.is_file():
+        print(f"нет файла: {audio}", file=sys.stderr)
+        return 2
+    turns, centroids = _diarize(audio, ctx)
+    if not turns:
+        print(f"отказ: в {audio.name} не найдено речи", file=sys.stderr)
+        return 1
+    speech = speech_seconds(turns)
+    raw = max(speech, key=speech.get)
+    display = relabel(turns)[raw]
+    sec = speech.get(raw, 0.0)
+    if sec < cfg.identify_min_speech:
+        print(f"отказ: всего {sec:.0f} с речи (нужно ≥ {cfg.identify_min_speech:.0f} с) — "
+              f"говорите без пауз около 30 с", file=sys.stderr)
+        return 1
+    emb = centroids.get(raw)
+    if emb is None or spkid.normalize(emb) is None:
+        print(f"отказ: у кластера {display} нет эмбеддинга", file=sys.stderr)
+        return 1
+    try:
+        sid = store.add(livevoice.SELF_NAME, emb, source_file=audio.name, label=raw,
+                        speech_sec=round(sec, 1), channel="reference")
+    except ValueError as e:
+        print(f"отказ: {e}", file=sys.stderr)
+        return 1
+    print(f"образец {sid}: «{livevoice.SELF_NAME}» ← {display}, {sec:.0f} с речи, "
+          f"эталонная запись из {audio.name}")
     return 0
 
 
@@ -753,6 +793,11 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--channel", choices=CHANNELS, default="other",
                    help="откуда запись: телефон, ВКС, другое (по умолчанию other)")
     e.set_defaults(func=cmd_enroll)
+
+    er = sub.add_parser("enroll-reference",
+                        help="эталонная запись одного человека (≈30 с) в базу как «Я» (этап 5)")
+    er.add_argument("audio")
+    er.set_defaults(func=cmd_enroll_reference)
 
     s = sub.add_parser("show", help="кластеры файла и кого база в них узнаёт")
     s.add_argument("audio")

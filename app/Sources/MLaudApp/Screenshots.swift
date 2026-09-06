@@ -155,7 +155,8 @@ enum CallFixtures {
 
     static var all: [(String, Fixture)] {
         [("3a-prompter-list", list), ("3b-call-ready", ready), ("3c-call-running", running),
-         ("3d-call-finishing", finishing), ("3e-call-done", done)]
+         ("3d-call-finishing", finishing), ("3e-call-done", done),
+         ("3l-offline-ready", offlineReady)]
     }
 
     private static func date(_ iso: String) -> Date {
@@ -193,6 +194,15 @@ enum CallFixtures {
         f.call.appAudio = .ok
         f.apps = apps
         f.selected = 4242
+        return f
+    }
+
+    /// Этап 5: офлайн — один микрофон, строка эталона и брифа, звука приложения нет.
+    static var offlineReady: Fixture {
+        var f = base(.ready)
+        f.call.mode = "offline"
+        f.call.headphonesWarning = false
+        f.call.appAudio = .unknown
         return f
     }
 

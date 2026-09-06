@@ -284,7 +284,7 @@ func runCallRecorderTests() {
         check(!message.contains("couldn’t be completed") && !message.contains("Failure error"), "текст ошибки, а не обёртка NSError: \(message)")
         check(exists(pcm), ".pcm оставлен")
         eq((try FileManager.default.attributesOfItem(atPath: pcm.path)[.size] as? NSNumber)?.uint64Value, tooBig, ".pcm не тронут")
-        eq(listing(inbox.appendingPathComponent(".incoming")), ["\(testCallID).pcm"], "ни .wav, ни .m4a в .incoming")
+        eq(listing(inbox.appendingPathComponent(".incoming")), ["\(testCallID).chan", "\(testCallID).pcm"], "ни .wav, ни .m4a в .incoming (маркер каналов остаётся)")
         check(!exists(inbox.appendingPathComponent(testCallID + ".m4a")), "<id>.m4a в inbox не появился")
         check(exists(inbox.appendingPathComponent(testCallID + ".channels.json")), "сайдкар на месте")
         eq(InboxScanner().readyAudioFiles(in: inbox), [], "сканер inbox ничего не видит")

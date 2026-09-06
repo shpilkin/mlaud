@@ -151,6 +151,43 @@ struct CallScreen: View {
         }
     }
 
+    /// Эталон «Я» (этап 5): живая пометка работает только с образцом голоса в базе.
+    @ViewBuilder
+    private var selfVoiceRow: some View {
+        NitiRow(bar: model.selfVoiceReady ? Niti.Colors.accent : Niti.Colors.warning) {
+            HStack(spacing: Niti.Spacing.s3) {
+                Image(systemName: "person.wave.2")
+                    .foregroundStyle(Niti.Colors.subtle)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Ваш голос")
+                        .font(Niti.Typography.md)
+                        .foregroundStyle(Niti.Colors.text)
+                    Text(model.selfVoiceReady
+                         ? "эталон в базе: реплики будут помечаться «Я / не я»"
+                         : "без эталона все реплики останутся «Я»: 30 с речи — и база готова")
+                        .font(Niti.Typography.sm)
+                        .foregroundStyle(Niti.Colors.muted)
+                }
+                Spacer(minLength: Niti.Spacing.s2)
+                if let sec = model.selfVoiceRecording {
+                    ProgressView(value: sec, total: 30)
+                        .frame(width: 90)
+                    Text("\(Int(30 - sec)) с")
+                        .font(Niti.Typography.sm)
+                        .foregroundStyle(Niti.Colors.muted)
+                        .monospacedDigit()
+                    Button("Отмена") { model.commands?.cancelSelfVoiceRecording() }
+                        .buttonStyle(.niti(.plain, size: .small))
+                } else if model.selfVoiceReady {
+                    NitiStatusPill("готово", tone: .success, systemImage: "checkmark")
+                } else {
+                    Button("Записать 30 с") { model.commands?.recordSelfVoice() }
+                        .buttonStyle(.niti(.primary, size: .small))
+                }
+            }
+        }
+    }
+
     /// Бриф = ключ к суфлёру: без него подсказчика нет (транскрипт и запись работают).
     /// Выбор прямо в чек-листе, чтобы «Начать звонок» не молчал о причине.
     @ViewBuilder
@@ -221,6 +258,9 @@ struct CallScreen: View {
         VStack(alignment: .leading, spacing: 0) {
             NitiRowSection("Перед стартом")
             VStack(spacing: 0) {
+                if call.mode == "offline" {
+                    selfVoiceRow
+                }
                 briefRow
                 NitiRow {
                     checkRow("Микрофон", item: call.microphone) {

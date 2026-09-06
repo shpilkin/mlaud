@@ -622,3 +622,33 @@ def test_assign_delete_hides_cluster_and_restore_brings_back(tmp_path):
     assert voices.main(["assign", str(path), "1", "--restore"], cfg=cfg) == 0
     c = spk.load(path)["clusters"][0]
     assert c["hidden"] is False and spk.pending_count(spk.load(path)) == 1
+
+
+# --- этап 5: эталонная запись «Я» (FR-8.5) --------------------------------------
+
+def test_enroll_reference_puts_self_in_base(tmp_path, audio, capsys):
+    """Эталон: самый длинный кластер → персона «Я», канал reference."""
+    cfg = make_cfg(tmp_path)
+    fake = FakeDiarizer()
+    code = voices.main(["enroll-reference", str(audio)], cfg=cfg, diarizer=fake)
+    out = capsys.readouterr()
+    assert code == 0, out.err
+    assert "«Я»" in out.out and "94" in out.out
+    store = VoiceStore(cfg.voices_dir)
+    samples = store.samples("Я")
+    assert len(samples) == 1
+    assert samples[0]["channel"] == "reference"
+    assert samples[0]["label"] == "SPEAKER_01"      # длинный кластер, не 5-секундный
+    # галерея теперь отдаёт центроид «Я» — живая пометка включится
+    assert "Я" in store.gallery()
+
+
+def test_enroll_reference_refuses_short_speech(tmp_path, audio, capsys):
+    cfg = make_cfg(tmp_path)
+    short = FakeDiarizer(turns=[{"start": 0.0, "end": 8.0, "speaker": "SPEAKER_00"}],
+                        centroids={"SPEAKER_00": unit(1)})
+    code = voices.main(["enroll-reference", str(audio)], cfg=cfg, diarizer=short)
+    out = capsys.readouterr()
+    assert code == 1
+    assert "≥ 30" in out.err or "≥ 30" in out.err
+    assert VoiceStore(cfg.voices_dir).people() == {}

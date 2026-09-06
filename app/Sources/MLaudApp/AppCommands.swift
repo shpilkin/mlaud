@@ -51,6 +51,8 @@ protocol AppCommands: AnyObject {
     func removeMaterial(slug: String, name: String)
     func startCall(brief slug: String)
     func prepareCallBrief(_ slug: String?)
+    func recordSelfVoice()
+    func cancelSelfVoiceRecording()
     func requestHint()
     func togglePrompterPause()
     func pinCard(_ id: String)

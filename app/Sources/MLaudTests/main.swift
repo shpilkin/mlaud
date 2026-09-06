@@ -1127,7 +1127,7 @@ test("VoicesPresentation: строки вкладки «Люди»") {
     eq(VoicesPresentation.sampleLine(listing.people[0].samples[0]), "54 с · телефон · rec.m4a · 2026-09-03", "образец")
     eq(VoicesPresentation.sampleLine(listing.people[1].samples[1]), "120 с · weird · b.m4a · 2026-08-21", "неизвестный канал — как есть")
     eq(VoicesPresentation.channelTitle("vks"), "ВКС", "канал")
-    eq(VoicesPresentation.channels.map(\.value), ["phone", "vks", "other"], "порядок каналов — как в worker'е")
+    eq(VoicesPresentation.channels.map(\.value), ["phone", "vks", "other", "reference"], "порядок каналов — как в worker'е (эталон — этап 5)")
     eq(listing.people.map(\.id), ["Милана Г", "я"], "человек идентифицируется именем")
 }
 
@@ -1641,6 +1641,7 @@ test("RecordingIndex: имена говорящих звонка — из channe
 
 removeTestDefaults()
 runCallRecorderTests()
+runOfflineTests()
 runPrompterTests()
 print("\n==== Swift tests: \(passed) passed, \(failed) failed ====")
 exit(failed == 0 ? 0 : 1)

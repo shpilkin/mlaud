@@ -92,6 +92,9 @@ final class AppModel {
     var calls: [CallRecord] = []
     /// Slug брифа готовящегося звонка; nil — без брифа (суфлёр выключен).
     var callBriefSlug: String?
+    /// Эталон «Я» в базе голосов (этап 5); прогресс записи — секунды, nil — не пишем.
+    var selfVoiceReady = false
+    var selfVoiceRecording: Double? = nil
 
     // Суфлёр этапа 4: брифы, редактор, экран итогов, вкладка настроек (§1.7)
     var briefs: [BriefSummary] = []

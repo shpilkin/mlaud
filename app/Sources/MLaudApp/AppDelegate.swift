@@ -160,6 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refreshConnections()
             settings.profileText = (try? String(contentsOf: prompterPaths.profile, encoding: .utf8)) ?? ""
             model.prompterView = .list
+            refreshSelfVoice()
         }
         model.commands = self
         mainWindow = MainWindowController(model: model)
@@ -549,6 +550,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Голоса
+
+    // MARK: - Эталон «Я» (этап 5, FR-8.5)
+
+    /// Каталог базы голосов — тот же, что у worker'а (переопределение как у inbox).
+    private var voicesDirectory: URL {
+        if let p = ProcessInfo.processInfo.environment["MLAUD_VOICES_DIR"] {
+            return URL(fileURLWithPath: p, isDirectory: true)
+        }
+        return home.appendingPathComponent("ASR/voices", isDirectory: true)
+    }
+
+    /// Есть ли персона «Я» в базе: живая пометка без неё не работает (S4).
+    private func refreshSelfVoice() {
+        let index = voicesDirectory.appendingPathComponent("index.json")
+        guard let data = try? Data(contentsOf: index),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let people = obj["people"] as? [String: Any]
+        else {
+            model.selfVoiceReady = false
+            return
+        }
+        model.selfVoiceReady = people["Я"] != nil
+    }
+
+    private var selfVoiceCapture: AudioCapture?
+    private var selfVoiceTimer: Timer?
+    private var selfVoicePCM = Data()
+    private static let selfVoiceSeconds: Double = 30
+
+    func recordSelfVoice() {
+        guard selfVoiceCapture == nil else { return }
+        guard dictation?.state != .listening && dictation?.state != .starting else {
+            notify(title: "MLaud — голос", body: "сначала выключите диктовку: микрофон один")
+            return
+        }
+        guard model.call.phase != .running else {
+            notify(title: "MLaud — голос", body: "во время звонка запись эталона недоступна")
+            return
+        }
+        let capture = AudioCapture { [weak self] pcm in
+            DispatchQueue.main.async { self?.selfVoicePCM.append(pcm) }
+        }
+        capture.onDiagnostic = { DictationLog.write("эталон: \($0)") }
+        capture.onFailure = { [weak self] message in
+            self?.finishSelfVoice(failed: message)
+        }
+        selfVoicePCM = Data()
+        model.selfVoiceRecording = 0
+        capture.start { [weak self] error in
+            guard let self, self.selfVoiceCapture === capture else { return }
+            if let error {
+                self.finishSelfVoice(failed: error.localizedDescription)
+                return
+            }
+            let started = Date()
+            let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                let sec = Date().timeIntervalSince(started)
+                if sec >= Self.selfVoiceSeconds {
+                    self.finishSelfVoice()
+                } else {
+                    model.selfVoiceRecording = sec
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.selfVoiceTimer = timer
+        }
+        selfVoiceCapture = capture
+    }
+
+    func cancelSelfVoiceRecording() {
+        finishSelfVoice(cancelled: true)
+    }
+
+    private func finishSelfVoice(cancelled: Bool = false, failed: String? = nil) {
+        selfVoiceTimer?.invalidate()
+        selfVoiceTimer = nil
+        selfVoiceCapture?.stop()
+        selfVoiceCapture = nil
+        model.selfVoiceRecording = nil
+        if let failed {
+            notify(title: "MLaud — голос", body: "запись не удалась: \(failed)")
+            return
+        }
+        guard !cancelled else {
+            model.toast = "Запись эталона отменена"
+            return
+        }
+        enrollSelfVoice(selfVoicePCM)
+    }
+
+    /// 30 с речи → wav → `voices enroll-reference` (диаризация на CPU worker'а).
+    private func enrollSelfVoice(_ pcm: Data) {
+        let dir = serviceDirectory.appendingPathComponent("self-voice", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stamp = ChannelsSidecar.callID(startedAt: Date())
+        let wav = dir.appendingPathComponent("\(stamp).wav")
+        var data = CallRecorder.wavHeader(dataBytes: pcm.count, channels: 1)
+        data.append(pcm)
+        do {
+            try data.write(to: wav)
+        } catch {
+            notify(title: "MLaud — голос", body: "файл не записался: \(error.localizedDescription)")
+            return
+        }
+        let command = WorkerCommand(
+            pythonExecutable: pythonExecutable,
+            workerDirectory: workerDirectory,
+            inboxFolder: folderStore.inboxFolder ?? serviceDirectory,
+            additionalPythonPath: additionalPythonPath,
+            extraEnvironment: settingsStore.workerEnvironment(),
+            module: "mlaud_worker.voices",
+            moduleArguments: ["enroll-reference", wav.path])
+        notify(title: "MLaud — голос", body: "считаю отпечаток…")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = command.makeProcess()
+            process.standardOutput = FileHandle.nullDevice
+            let stderr = Pipe()
+            process.standardError = stderr
+            _ = try? process.run()
+            process.waitUntilExit()
+            let text = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                              encoding: .utf8) ?? ""
+            let ok = process.terminationStatus == 0
+            DispatchQueue.main.async {
+                self?.refreshSelfVoice()
+                self?.notify(title: "MLaud — голос",
+                             body: ok ? "Голос записан в базу как «Я»" : "Не получилось: " + text.prefix(120))
+            }
+        }
+    }
 
     private func refreshPendingVoices() {
         pendingVoices = settings.identifyEnabled ? speakers.pendingCount() : 0

@@ -168,13 +168,17 @@ def test_stat_counters_reset_between_phrases():
 
 # --- протокол ------------------------------------------------------------------
 
+def _pcm_bytes(samples: np.ndarray) -> bytes:
+    return (samples * 32767).astype("<i2").tobytes()
+
+
 def _pcm(samples: np.ndarray) -> str:
-    return base64.b64encode((samples * 32767).astype("<i2").tobytes()).decode()
+    return base64.b64encode(_pcm_bytes(samples)).decode()
 
 
 def test_pcm16_roundtrip():
     src = np.array([0.0, 0.5, -0.5], dtype=np.float32)
-    back = d.pcm16_to_float32((src * 32767).astype("<i2").tobytes())
+    back = d.pcm16_to_float32(_pcm_bytes(src))
     assert np.allclose(back, src, atol=1e-3)
 
 
@@ -294,8 +298,9 @@ def test_phrase_text_is_full_window_not_tail():
 
 
 def _registry(decoders):
-    return d.ChannelRegistry(lambda ch, label: d.DictationSession(
-        decoders[ch], decode_every_sec=0.4, vad=d.SilenceDetector(hold_sec=0.4), ch=ch, label=label))
+    return d.ChannelRegistry(lambda ch, label, voice=None: d.DictationSession(
+        decoders[ch], decode_every_sec=0.4, vad=d.SilenceDetector(hold_sec=0.4), ch=ch, label=label,
+        voice=voice))
 
 
 def test_registry_two_channels_independent():
@@ -464,3 +469,113 @@ def test_make_session_lag_only_for_channels():
     assert legacy.max_lag_sec is None and legacy.ch is None
     them = d._make_session(dec, "them", "x")
     assert them.max_lag_sec == 1.0 and them.ch == "them" and them.label == "x"
+
+
+# --- Этап 5: живая пометка «Я / не я» (open с voice, поле в phrase) ---
+
+class FakeVoice:
+    """Подставной маркер: помечает всё как self=True со счётом 0.7."""
+
+    def __init__(self, self_flag=True):
+        self.self_flag = self_flag
+        self.marks = 0
+
+    def mark(self, samples):
+        self.marks += 1
+        return {"self": self.self_flag, "score": 0.7}
+
+
+def _voice_registry(decoders, loader):
+    reg = d.ChannelRegistry(lambda ch, label, voice=None: d.DictationSession(
+        decoders[ch], decode_every_sec=0.4, vad=d.SilenceDetector(hold_sec=0.4), ch=ch,
+        label=label, voice=voice), voice_loader=loader)
+    return reg
+
+
+
+def _feed_pcm(reg, ch, samples):
+    """Кадрами по 0.1 с, как приходят буферы захвата; вернуть все события."""
+    events = []
+    for i in range(0, samples.size, 1600):
+        chunk = (samples[i:i + 1600] * 32767).astype("<i2").tobytes()
+        events.extend(reg.handle({"t": "audio", "ch": ch,
+                                  "pcm": base64.b64encode(chunk).decode()}))
+    return events
+
+def test_open_with_voice_marks_phrase():
+    voice = FakeVoice(self_flag=False)
+    dec = FakeDecoder({0.4: "привет мир"})
+    reg = _voice_registry({"me": dec}, loader=lambda: voice)
+    assert reg.handle({"t": "open", "ch": "me", "label": "Я", "voice": True}) == []
+    # 3 с речи → тишина: фраза закрывается, окно ≥ 2 с — маркер отрабатывает
+    _feed_pcm(reg, "me", _speech(3.0))
+    closed = _feed_pcm(reg, "me", _silence(0.6))
+    phrase = [e for e in closed if e["t"] == "phrase"]
+    assert len(phrase) == 1
+    assert phrase[0]["voice"] == {"self": False, "score": 0.7}
+    assert voice.marks == 1
+
+
+def test_open_without_voice_no_field():
+    """Обычные каналы (диктовка, ВКС) не меняются: без флага поле не появляется."""
+    reg = _voice_registry({"me": FakeDecoder({0.4: "привет мир"})}, loader=lambda: FakeVoice())
+    reg.handle({"t": "open", "ch": "me", "label": "Я"})
+    _feed_pcm(reg, "me", _speech(3.0))
+    closed = _feed_pcm(reg, "me", _silence(0.6))
+    phrase = [e for e in closed if e["t"] == "phrase"]
+    assert len(phrase) == 1 and "voice" not in phrase[0]
+
+
+def test_open_voice_without_self_person_is_error():
+    """Флаг есть, персоны «Я» в базе нет — ошибка каналом, сессия не создаётся."""
+    reg = _voice_registry({"me": FakeDecoder({})}, loader=lambda: None)
+    events = reg.handle({"t": "open", "ch": "me", "label": "Я", "voice": True})
+    assert events and events[0]["t"] == "error" and "«Я»" in events[0]["message"]
+    assert events[0]["ch"] == "me"
+
+
+def test_voice_loader_called_once():
+    """Модель грузится один раз на процесс, не на каждый open."""
+    calls = []
+    reg = _voice_registry({"me": FakeDecoder({}), "them": FakeDecoder({})},
+                          loader=lambda: calls.append(1) or FakeVoice())
+    reg.handle({"t": "open", "ch": "me", "label": "Я", "voice": True})
+    reg.handle({"t": "open", "ch": "them", "label": "Не я", "voice": True})
+    reg.handle({"t": "close", "ch": "me"})
+    reg.handle({"t": "open", "ch": "me", "label": "Я", "voice": True})
+    assert len(calls) == 1
+
+
+def test_live_voice_marks_do_not_touch_base(tmp_path):
+    """5.4: живые пометки — только события; каталог voices/ не меняется."""
+    import json
+    from mlaud_worker.voices import VoiceStore
+
+    root = tmp_path / "voices"
+    vec = np.zeros(4, np.float32)
+    vec[0] = 1.0
+    store = VoiceStore(root)
+    store.add("Я", vec, source_file="ref.wav", label="SPEAKER_00", speech_sec=30.0,
+              channel="reference")
+    before = sorted(p.name for p in root.rglob("*"))
+
+    import mlaud_worker.livevoice as lv
+    real_loader = d._voice_loader
+    d._voice_loader = lambda: lv.LiveVoice(lambda s: vec, vec)
+    try:
+        import io
+        stdin = io.StringIO("\\n".join([
+            json.dumps({"t": "open", "ch": "me", "label": "Я", "voice": True}),
+            "garbage-not-json",
+            json.dumps({"t": "quit"}),
+        ]) + "\\n")
+        stdout = io.StringIO()
+        code = d.serve(stdin=stdin, stdout=stdout, decode=lambda a: "текст")
+        assert code == 0
+        events = [json.loads(l) for l in stdout.getvalue().splitlines()]
+        assert events[0]["t"] == "ready"
+    finally:
+        d._voice_loader = real_loader
+
+    after = sorted(p.name for p in root.rglob("*"))
+    assert before == after

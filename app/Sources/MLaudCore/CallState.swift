@@ -134,3 +134,13 @@ public struct CallAppCandidate: Identifiable, Equatable, Hashable, Sendable {
         self.bundleID = bundleID
     }
 }
+
+
+/// Этап 5: куда положить фразу одного микрофона по живой пометке голоса (S4).
+/// Свои → канал «Я»; чужие → канал «не я» (без имён); короче 2 с сигнала нет — «?».
+public enum OfflineVoicePolicy {
+    public static func route(_ phrase: ChannelPhrase) -> (ch: CallChannel, label: String) {
+        guard let voice = phrase.voice else { return (.me, "?") }
+        return voice.isSelf ? (.me, "Я") : (.them, "не я")
+    }
+}

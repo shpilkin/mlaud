@@ -20,7 +20,9 @@ public final class CallRecorder {
 
     public let inbox: URL
     public let callID: String
-    public let sidecar: ChannelsSidecar
+    public let sidecar: ChannelsSidecar?
+    /// Каналов в записи: 2 — ВКС (интерливед стерео, с сайдкаром), 1 — офлайн (моно, FR-12.11).
+    public let channels: Int
     public let sampleRate: Int
     public let afconvert: URL
     public private(set) var sidecarURL: URL?
@@ -34,11 +36,13 @@ public final class CallRecorder {
     private var closed = false
     private var writeError: String?
 
-    public init(inbox: URL, callID: String, sidecar: ChannelsSidecar, sampleRate: Int = 16000,
-                afconvert: URL = URL(fileURLWithPath: "/usr/bin/afconvert")) {
+    public init(inbox: URL, callID: String, sidecar: ChannelsSidecar?, sampleRate: Int = 16000,
+                channels: Int = 2, afconvert: URL = URL(fileURLWithPath: "/usr/bin/afconvert")) {
+        precondition(sidecar == nil || channels == 2, "сайдкар каналов — только стерео-записи ВКС")
         self.inbox = inbox
         self.callID = callID
         self.sidecar = sidecar
+        self.channels = channels
         self.sampleRate = sampleRate
         self.afconvert = afconvert
     }
@@ -57,6 +61,7 @@ public final class CallRecorder {
     private var tempM4AURL: URL { incomingDir.appendingPathComponent(callID + ".m4a") }
     private var finalM4AURL: URL { Self.audioURL(inbox: inbox, callID: callID) }
     private var sidecarFileURL: URL { Self.sidecarURL(inbox: inbox, callID: callID) }
+    private var channelsMarkerURL: URL { incomingDir.appendingPathComponent(callID + ".chan") }
 
     private static func incomingDir(inbox: URL) -> URL {
         inbox.appendingPathComponent(incomingDirectory, isDirectory: true)
@@ -76,22 +81,26 @@ public final class CallRecorder {
 
     // MARK: - Запись
 
-    /// 1) сайдкар atomic (tmp + rename) в inbox; 2) mkdir .incoming; 3) создать .pcm.
+    /// 1) сайдкар atomic (tmp + rename) в inbox — только ВКС; 2) mkdir .incoming и маркер
+    /// каналов (моно .pcm не отличить от стерео, recover читает маркер); 3) создать .pcm.
     public func start() throws {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: inbox.path, isDirectory: &isDir), isDir.boolValue else {
             throw Failure.inboxMissing
         }
-        do {
-            try sidecar.encoded().write(to: sidecarFileURL, options: .atomic)
-        } catch {
-            throw Failure.io("сайдкар: \(error.localizedDescription)")
+        if let sidecar {
+            do {
+                try sidecar.encoded().write(to: sidecarFileURL, options: .atomic)
+            } catch {
+                throw Failure.io("сайдкар: \(error.localizedDescription)")
+            }
+            sidecarURL = sidecarFileURL
         }
-        sidecarURL = sidecarFileURL
         do {
             try fm.createDirectory(at: incomingDir, withIntermediateDirectories: true)
             try? fm.removeItem(at: pcmURL)
+            try? Data("\(channels)".utf8).write(to: channelsMarkerURL)
             guard fm.createFile(atPath: pcmURL.path, contents: nil) else {
                 throw Failure.io("не создался \(pcmURL.lastPathComponent)")
             }
@@ -150,7 +159,7 @@ public final class CallRecorder {
     public func abort() {
         _ = closeHandle()
         let fm = FileManager.default
-        for url in [pcmURL, wavURL, tempM4AURL] {
+        for url in [pcmURL, wavURL, tempM4AURL, channelsMarkerURL] {
             try? fm.removeItem(at: url)
         }
         try? fm.removeItem(at: sidecarFileURL)
@@ -198,6 +207,7 @@ public final class CallRecorder {
         // Сначала .wav, потом .pcm: при крахе посреди уборки остаётся источник для recover.
         try? fm.removeItem(at: wavURL)
         try? fm.removeItem(at: pcmURL)
+        try? fm.removeItem(at: channelsMarkerURL)
         return .success(output)
     }
 
@@ -216,7 +226,7 @@ public final class CallRecorder {
         }
         let writer = try FileHandle(forWritingTo: wav)
         defer { try? writer.close() }
-        try writer.write(contentsOf: Self.wavHeader(dataBytes: size, channels: 2, sampleRate: sampleRate))
+        try writer.write(contentsOf: Self.wavHeader(dataBytes: size, channels: channels, sampleRate: sampleRate))
         let chunk = 1 << 20
         while true {
             let data = try reader.read(upToCount: chunk) ?? Data()
@@ -283,7 +293,8 @@ public final class CallRecorder {
 
     // MARK: - Восстановление
 
-    /// При запуске: .incoming/<id>.pcm, у которых в inbox лежит <id>.channels.json, доделать как finish; .pcm без сайдкара — удалить;
+    /// При запуске: .incoming/<id>.pcm, у которых в inbox лежит <id>.channels.json (ВКС) или
+    /// маркер <id>.chan = 1 (офлайн-моно), доделать как finish; прочие .pcm — удалить;
     /// <id>.channels.json, у которого нет ни .incoming/<id>.pcm, ни <inbox>/<id>.m4a (крах между шагами 1 и 3), — удалить.
     public static func recover(inbox: URL, completion: @escaping ([Output]) -> Void) {
         workQueue.async {
@@ -302,13 +313,19 @@ public final class CallRecorder {
         for name in pending {
             let callID = String(name.dropLast(".pcm".count))
             let sidecarFile = sidecarURL(inbox: inbox, callID: callID)
-            guard fm.fileExists(atPath: sidecarFile.path) else {
+            let marker = incoming.appendingPathComponent(callID + ".chan")
+            let mono = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespaces) == "1"
+            guard fm.fileExists(atPath: sidecarFile.path) || mono else {
                 try? fm.removeItem(at: incoming.appendingPathComponent(name))
+                try? fm.removeItem(at: marker)
                 continue
             }
             let sidecar = (try? Data(contentsOf: sidecarFile)).flatMap { try? ChannelsSidecar.decode($0) }
-                ?? ChannelsSidecar(callID: callID, themLabel: CallChannel.them.defaultLabel)
-            let recorder = CallRecorder(inbox: inbox, callID: callID, sidecar: sidecar)
+            if sidecar == nil, !mono {
+                continue   // битый сайдкар: не восстановленное, карантин не трогаем
+            }
+            let recorder = CallRecorder(inbox: inbox, callID: callID, sidecar: sidecar,
+                                        channels: mono ? 1 : 2)
             if case .success(let output) = recorder.convertOnQueue() {
                 outputs.append(output)
             }

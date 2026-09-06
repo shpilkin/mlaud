@@ -89,6 +89,8 @@ final class CallController {
     }
 
     private var phase: CallPhase { session.snapshot.phase }
+    /// Офлайн (этап 5): один микрофон, пометка «Я / не я» по голосу, моно без сайдкара.
+    private var offline: Bool { session.snapshot.mode == "offline" }
 
     // MARK: - Суфлёр (этап 4)
 
@@ -268,11 +270,15 @@ final class CallController {
         let startedAt = deps.now()
         let callID = ChannelsSidecar.callID(startedAt: startedAt)
         let briefInfo = brief
-        let sidecar = ChannelsSidecar(callID: callID,
-                                      themLabel: briefInfo.map { BriefParser.themLabel($0.brief) } ?? "Собеседник",
-                                      brief: briefInfo?.brief.title)
+        let isOffline = offline
+        let sidecar: ChannelsSidecar? = isOffline
+            ? nil
+            : ChannelsSidecar(callID: callID,
+                              themLabel: briefInfo.map { BriefParser.themLabel($0.brief) } ?? "Собеседник",
+                              brief: briefInfo?.brief.title)
 
-        var record = CallRecord(callID: callID, startedAt: startedAt, model: deps.modelType(), channels: sidecar.channels)
+        var record = CallRecord(callID: callID, startedAt: startedAt, model: deps.modelType(),
+                                channels: isOffline ? [CallChannel.me.key: "Я"] : (sidecar?.channels ?? [:]))
         record.brief = briefInfo?.brief.title
         record.briefDir = briefInfo?.slug
         record.inputDevice = session.snapshot.inputDeviceName
@@ -285,7 +291,8 @@ final class CallController {
             return
         }
 
-        let recorder = CallRecorder(inbox: inbox, callID: callID, sidecar: sidecar)
+        let recorder = CallRecorder(inbox: inbox, callID: callID, sidecar: sidecar,
+                                    channels: isOffline ? 1 : 2)
         do {
             try recorder.start()
         } catch {
@@ -295,7 +302,9 @@ final class CallController {
         }
 
         let folder = CallStore.folder(root: deps.promptRoot, callID: callID)
-        let transcript = LiveTranscript(labels: [.me: sidecar.label(.me), .them: sidecar.label(.them)],
+        let transcript = LiveTranscript(labels: isOffline
+                ? [.me: "Я", .them: "не я"]
+                : [.me: sidecar?.label(.me) ?? "Я", .them: sidecar?.label(.them) ?? "Собеседник"],
                                         fileURL: folder.appendingPathComponent(Self.transcriptFileName))
         transcript.onChange = { [weak self, weak transcript] in
             guard let self, let transcript else { return }
@@ -308,7 +317,7 @@ final class CallController {
         self.record = record
         self.recorder = recorder
         self.transcript = transcript
-        self.tracks = CallTracks(sampleRate: Self.sampleRate)
+        self.tracks = isOffline ? nil : CallTracks(sampleRate: Self.sampleRate)
         agendaTimer = AgendaTimer(expectedMin: briefInfo?.brief.expectedMin ?? 60,
                                   agenda: briefInfo?.brief.agenda ?? [])
         lastPrompterLineID = nil
@@ -362,9 +371,13 @@ final class CallController {
     }
 
     private func tick() {
-        guard phase == .running, let tracks, let recorder else { return }
+        guard phase == .running, let recorder else { return }
         session.apply(.tick)
         prompterTick()
+        guard let tracks else {              // офлайн: микрофон непрерывен, добивка не нужна
+            session.apply(.recorded(Double(recordedFrames) / Double(Self.sampleRate)))
+            return
+        }
         // Стерео сливается парами кадров: дорожка без звука (приложение не выбрано, микрофон
         // умер, поток встал) держала бы вторую в памяти и .pcm не рос бы до «Стоп».
         // Тишина по времени звонка — в запись и, пока источник жив, в распознаватель (§2.4).
@@ -471,6 +484,10 @@ final class CallController {
     // MARK: - Звук приложения
 
     private func startAppAudio() {
+        if offline {
+            session.apply(.channel(.them, .idle))   // канала собеседника нет: один микрофон
+            return
+        }
         guard let selected = selectedApp else {
             session.apply(.channel(.them, .noAudio("приложение не выбрано")))
             return
@@ -514,7 +531,14 @@ final class CallController {
             if case .error(let message) = event {
                 DictationLog.write("звонок: канал \(ch): \(message)")
             }
-            transcript.apply(channel, event)
+            if self.offline, case .phrase(let phrase) = event {
+                // Этап 5: физический канал один; метка строки — по голосу (S4), свои — «Я»,
+                // чужие — «не я», короче 2 с — «?». Ход суфлёра триггерят «не я»-фразы (them).
+                let routed = OfflineVoicePolicy.route(phrase)
+                transcript.apply(routed.ch, event, label: routed.label)
+            } else {
+                transcript.apply(channel, event)
+            }
         }
         handlers.onTerminated = { [weak self] unexpected in
             self?.recognizerTerminated(unexpected: unexpected)
@@ -537,7 +561,15 @@ final class CallController {
     /// Только после ready: звук до него пишется, но не шлётся, а `open` несёт смещение
     /// головы записи канала — так t0/t1 ленты совпадают с позицией в .m4a (§3.3, D13).
     private func openChannels() {
-        guard let tracks, let transcript, let sidecar else { return }
+        guard let transcript else { return }
+        if offline {
+            // Один микрофон с живой пометкой голоса; время — от принятого звука (запись моно).
+            deps.recognizer.send(.open(ch: CallChannel.me.rawValue, label: "Я", voice: true))
+            transcript.open(CallChannel.me, offset: 0)
+            opened.insert(CallChannel.me)
+            return
+        }
+        guard let tracks, let sidecar else { return }
         for ch in CallChannel.allCases {
             let offset = Double(tracks.samples(ch)) / Double(Self.sampleRate)
             deps.recognizer.send(.open(ch: ch.rawValue, label: sidecar.label(ch)))
@@ -570,7 +602,18 @@ final class CallController {
     // MARK: - Звук
 
     private func onChunk(_ ch: CallChannel, _ pcm: Data) {
-        guard phase == .running, let tracks, let recorder, !pcm.isEmpty else { return }
+        guard phase == .running, let recorder, !pcm.isEmpty else { return }
+        if offline {
+            guard ch == .me else { return }
+            recorder.append(interleaved: pcm)     // моно: байты как есть
+            recordedFrames += pcm.count / 2
+            if opened.contains(.me) {
+                deps.recognizer.send(.audio(ch: CallChannel.me.rawValue, pcm: pcm))
+            }
+            healthFor(ch, pcm)
+            return
+        }
+        guard let tracks else { return }
         let aligned = tracks.align(ch, pcm: pcm, at: elapsed)
         let interleaved = tracks.push(ch, pcm: aligned)
         recorder.append(interleaved: interleaved)
@@ -578,7 +621,11 @@ final class CallController {
         if opened.contains(ch) {
             deps.recognizer.send(.audio(ch: ch.rawValue, pcm: aligned))
         }
-        let rms = AudioPCM.rms(int16: aligned)
+        healthFor(ch, aligned)
+    }
+
+    private func healthFor(_ ch: CallChannel, _ pcm: Data) {
+        let rms = AudioPCM.rms(int16: pcm)
         session.apply(.level(ch, rms))
         let now = deps.now()
         if rms >= 0.006 {
@@ -595,10 +642,12 @@ final class CallController {
     /// running → finishing → done. Конвертация записи — после итогов суфлёра (§3.7):
     /// outcome.md должен существовать раньше .m4a, иначе конвейер не найдёт его для артефакта.
     func stop() {
-        guard phase == .running, let recorder, let tracks else { return }
+        guard phase == .running, let recorder else { return }
         stopCaptures()
         closeChannels()
-        recorder.append(interleaved: tracks.finish())
+        if let tracks {
+            recorder.append(interleaved: tracks.finish())
+        }
         session.apply(.stop)
         releaseRecognizer()
         outcomeDone = false

@@ -131,9 +131,19 @@ public enum JSONText {
     }
 }
 
+/// Пометка голоса в событии фразы (этап 5, S4: порог 0.60, фразы ≥ 2 с).
+public struct VoiceMark: Equatable, Sendable {
+    public let isSelf: Bool
+    public let score: Double
+    public init(isSelf: Bool, score: Double) {
+        self.isSelf = isSelf
+        self.score = score
+    }
+}
+
 /// Команда каналу живого звонка (feature-prompter.md §5.1). Без `ch` — DictationCommand.
 public enum ChannelCommand: Equatable {
-    case open(ch: String, label: String)
+    case open(ch: String, label: String, voice: Bool = false)   // voice — офлайн-режим (этап 5)
     case audio(ch: String, pcm: Data)   // int16 LE, 16 кГц, mono
     case flush(ch: String)
     case reset(ch: String)
@@ -141,8 +151,9 @@ public enum ChannelCommand: Equatable {
 
     public func line() -> String {
         switch self {
-        case .open(let ch, let label):
-            return #"{"t":"open","ch":\#(JSONText.quoted(ch)),"label":\#(JSONText.quoted(label))}"#
+        case .open(let ch, let label, let voice):
+            let voiceFlag = voice ? #","voice":true"# : ""
+            return #"{"t":"open","ch":\#(JSONText.quoted(ch)),"label":\#(JSONText.quoted(label))\#(voiceFlag)}"#
         case .audio(let ch, let pcm):
             return #"{"t":"audio","ch":\#(JSONText.quoted(ch)),"pcm":"\#(pcm.base64EncodedString())"}"#
         case .flush(let ch):
@@ -160,6 +171,7 @@ public enum ChannelCommand: Equatable {
 }
 
 /// Закрытая фраза канала. windowSec/decodes — поля бывшего stat.
+/// voice — пометка «Я / не я» (этап 5): только у каналов, открытых с флагом, ≥ 2 с.
 public struct ChannelPhrase: Equatable, Sendable {
     public let phrase: Int
     public let t0: Double        // секунды принятого звука канала от open
@@ -168,8 +180,9 @@ public struct ChannelPhrase: Equatable, Sendable {
     public let reason: String    // "silence" | "overflow" | "flush"
     public let windowSec: Double
     public let decodes: Int
+    public let voice: VoiceMark?
 
-    public init(phrase: Int, t0: Double, t1: Double, text: String, reason: String, windowSec: Double, decodes: Int) {
+    public init(phrase: Int, t0: Double, t1: Double, text: String, reason: String, windowSec: Double, decodes: Int, voice: VoiceMark? = nil) {
         self.phrase = phrase
         self.t0 = t0
         self.t1 = t1
@@ -177,6 +190,7 @@ public struct ChannelPhrase: Equatable, Sendable {
         self.reason = reason
         self.windowSec = windowSec
         self.decodes = decodes
+        self.voice = voice
     }
 }
 
@@ -207,6 +221,10 @@ public enum RecognizerEvent: Equatable {
         case "commit":  return .channel(ch: ch, .commit(phrase: phrase, text: text))
         case "preview": return .channel(ch: ch, .preview(phrase: phrase, text: text))
         case "phrase":
+            let voice = (obj["voice"] as? [String: Any]).flatMap { raw in
+                VoiceMark(isSelf: raw["self"] as? Bool ?? false,
+                          score: (raw["score"] as? NSNumber)?.doubleValue ?? 0)
+            }
             return .channel(ch: ch, .phrase(ChannelPhrase(
                 phrase: phrase,
                 t0: obj["t0"] as? Double ?? 0,
@@ -214,7 +232,8 @@ public enum RecognizerEvent: Equatable {
                 text: text,
                 reason: obj["reason"] as? String ?? "?",
                 windowSec: obj["window_sec"] as? Double ?? 0,
-                decodes: obj["decodes"] as? Int ?? 0)))
+                decodes: obj["decodes"] as? Int ?? 0,
+                voice: voice)))
         case "error":   return .channel(ch: ch, .error(obj["message"] as? String ?? ""))
         default:        return nil
         }

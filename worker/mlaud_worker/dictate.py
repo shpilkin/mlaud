@@ -178,7 +178,8 @@ class DictationSession:
                  vad: Optional[SilenceDetector] = None,
                  *, ch: Optional[str] = None, label: Optional[str] = None,
                  clock: Callable[[], float] = time.monotonic,
-                 max_lag_sec: Optional[float] = None):
+                 max_lag_sec: Optional[float] = None,
+                 voice=None):
         self.decode = decode
         self.decode_every = int(decode_every_sec * sr)
         self.max_window = int(max_window_sec * sr)
@@ -189,6 +190,7 @@ class DictationSession:
         self.label = label
         self.clock = clock
         self.max_lag_sec = max_lag_sec
+        self.voice = voice            # LiveVoice | None: пометка «Я / не я» в phrase (этап 5)
         self.received = 0           # сэмплов принято с создания; reset() не обнуляет
         self.phrase = 1             # номер открытой фразы; += 1 после события phrase
         self._t_first: Optional[float] = None
@@ -257,8 +259,13 @@ class DictationSession:
             else:
                 t0 = round((self.received - self._window.size) / self.sr, 2)
                 t1 = round(self.received / self.sr, 2)
-                events.append(self._event("phrase", t0=t0, t1=t1, text=text, reason=reason,
-                                          window_sec=window_sec, decodes=decodes))
+                phrase = self._event("phrase", t0=t0, t1=t1, text=text, reason=reason,
+                                     window_sec=window_sec, decodes=decodes)
+                if self.voice is not None and self._window.size:
+                    mark = self.voice.mark(self._window)
+                    if mark is not None:
+                        phrase["voice"] = mark
+                events.append(phrase)
                 self.phrase += 1
         self.reset()
         return events
@@ -285,9 +292,24 @@ class ChannelRegistry:
 
     MAIN = "main"
 
-    def __init__(self, make_session: Callable[[Optional[str], Optional[str]], DictationSession]):
+    def __init__(self, make_session, voice_loader=None):
         self._make = make_session
+        self._voice_loader = voice_loader   # () -> LiveVoice | None; лениво, один раз
+        self._voice = ...                   # загрузка при первом open с voice (этап 5)
         self._sessions: dict[str, DictationSession] = {}
+
+    def _voice_for(self, ch, want: bool):
+        """Маркер канала: без флага — None; с флагом — живой маркер или ошибка."""
+        if not want:
+            return None, []
+        if self._voice is ...:
+            if self._voice_loader is None:
+                self._voice = None
+            else:
+                self._voice = self._voice_loader()
+        if self._voice is None:
+            return None, [self._error(ch, "нет персоны «Я» в базе голосов — живые пометки выключены (запишите голос в «Голосах»)")]
+        return self._voice, []
 
     def session(self, ch: Optional[str]) -> DictationSession:
         """Сессия канала; создаётся лениво (для канала — с label = ch)."""
@@ -297,6 +319,8 @@ class ChannelRegistry:
             s = self._make(ch, ch)
             self._sessions[key] = s
         return s
+
+
 
     @staticmethod
     def _error(ch: Optional[str], message: str) -> dict:
@@ -315,7 +339,10 @@ class ChannelRegistry:
         if kind == "open":
             if ch is None:
                 return [self._error(None, "open без ch")]
-            self._sessions[ch] = self._make(ch, msg.get("label") or ch)
+            voice, errors = self._voice_for(ch, bool(msg.get("voice")))
+            if errors:
+                return errors
+            self._sessions[ch] = self._make(ch, msg.get("label") or ch, voice=voice)
             return []
         if kind == "audio":
             samples = pcm16_to_float32(base64.b64decode(msg.get("pcm", "")))
@@ -371,9 +398,20 @@ def _emit(event: dict, out=None) -> None:
 
 
 def _make_session(decode: Callable[[np.ndarray], str], ch: Optional[str],
-                  label: Optional[str]) -> DictationSession:
+                  label: Optional[str], voice=None) -> DictationSession:
     """Сессия для serve: сторож отставания только у каналов, диктовка без изменений."""
-    return DictationSession(decode, ch=ch, label=label, max_lag_sec=1.0 if ch else None)
+    return DictationSession(decode, ch=ch, label=label, max_lag_sec=1.0 if ch else None,
+                            voice=voice)
+
+
+def _voice_loader():
+    """Живой маркер из базы голосов (этап 5); каталог — как у воркера."""
+    from pathlib import Path
+
+    from . import livevoice
+
+    root = Path(os.environ.get("MLAUD_VOICES_DIR") or Path.home() / "ASR/voices")
+    return livevoice.load(root)
 
 
 def serve(stdin=None, stdout=None, decode: Optional[Callable] = None,
@@ -387,7 +425,8 @@ def serve(stdin=None, stdout=None, decode: Optional[Callable] = None,
         _emit({"t": "error", "message": str(e)}, stdout)
         return 1
 
-    registry = ChannelRegistry(functools.partial(_make_session, decode))
+    registry = ChannelRegistry(functools.partial(_make_session, decode),
+                               voice_loader=_voice_loader)
     _emit({"t": "ready"}, stdout)
 
     for line in stdin:

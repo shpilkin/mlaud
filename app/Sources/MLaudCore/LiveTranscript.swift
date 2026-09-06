@@ -35,6 +35,12 @@ public final class LiveTranscript {
     }
 
     public func apply(_ ch: CallChannel, _ event: ChannelEvent) {
+        apply(ch, event, label: nil)
+    }
+
+    /// `label` — переопределить метку строки (этап 5: офлайн кладёт реплики одного микрофона
+    /// в два канала по пометке голоса; неопознанные короткие — «?»).
+    public func apply(_ ch: CallChannel, _ event: ChannelEvent, label: String?) {
         var gen = generations[ch] ?? Generation()
         switch event {
         case .commit(_, let text):
@@ -47,11 +53,11 @@ public final class LiveTranscript {
             gen.joiner.reset()
             if !phrase.text.isEmpty {
                 nextID += 1
-                let label = labels[ch] ?? ch.defaultLabel
-                let line = TranscriptLine(id: nextID, ch: ch, label: label,
+                let lineLabel = label ?? labels[ch] ?? ch.defaultLabel
+                let line = TranscriptLine(id: nextID, ch: ch, label: lineLabel,
                                           t0: gen.offset + phrase.t0, t1: gen.offset + phrase.t1, text: phrase.text)
                 insert(line)
-                write(Self.encodeLine(ch: ch, label: label, t0: line.t0, t1: line.t1, text: line.text))
+                write(Self.encodeLine(ch: ch, label: lineLabel, t0: line.t0, t1: line.t1, text: line.text))
             }
         case .error:
             return

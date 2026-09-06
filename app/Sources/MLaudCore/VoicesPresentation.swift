@@ -14,6 +14,7 @@ public enum VoicesPresentation {
         Channel(value: "phone", title: "телефон"),
         Channel(value: "vks", title: "ВКС"),
         Channel(value: "other", title: "другое"),
+        Channel(value: "reference", title: "эталон"),
     ]
     public static let defaultChannel = "other"
 
