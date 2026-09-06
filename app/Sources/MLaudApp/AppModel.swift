@@ -90,6 +90,8 @@ final class AppModel {
     /// pid выбранного приложения звонка: в снимке только имя, а `Picker` привязывается к id.
     var callAppPID: Int32?
     var calls: [CallRecord] = []
+    /// Slug брифа готовящегося звонка; nil — без брифа (суфлёр выключен).
+    var callBriefSlug: String?
 
     // Суфлёр этапа 4: брифы, редактор, экран итогов, вкладка настроек (§1.7)
     var briefs: [BriefSummary] = []

@@ -1011,6 +1011,7 @@ extension AppDelegate: AppCommands {
         }
         if controller.session.snapshot.phase == .idle {
             controller.prepare()
+            model.callBriefSlug = nil
         }
         syncCallApps(from: controller)
     }
@@ -1255,9 +1256,21 @@ extension AppDelegate: AppCommands {
         startCallSetup()
         guard let controller = callController(),
               let brief = try? BriefStore.load(paths: prompterPaths, slug: slug) else { return }
+        model.callBriefSlug = slug
         controller.prepare(brief: (slug, brief))
         if controller.session.snapshot.canStart {
             startCall()
+        }
+    }
+
+    /// Выбор брифа в чек-листе перед стартом: суфлёр включается только с брифом.
+    func prepareCallBrief(_ slug: String?) {
+        guard let controller = callController() else { return }
+        model.callBriefSlug = slug
+        if let slug, let brief = try? BriefStore.load(paths: prompterPaths, slug: slug) {
+            controller.prepare(brief: (slug, brief))
+        } else {
+            controller.prepare(brief: nil)
         }
     }
 
@@ -1367,6 +1380,7 @@ extension AppDelegate: AppCommands {
 
     func saveConnection(_ c: LLMConnection, key: String?) {
         llmConnections.save(c)
+        settings.connectionCheck[c.id] = .idle      // старый «нет ключа» не должен висеть
         if let key = key?.trimmingCharacters(in: .whitespaces) {
             if key.isEmpty {
                 try? prompterSecrets.setSecret(nil, for: c.id)
@@ -1392,10 +1406,12 @@ extension AppDelegate: AppCommands {
 
     /// «Проверить» (FR-12.13): `--check` с ключом подключения, stdin — JSON подключения.
     func checkConnection(id: String) {
-        guard let connection = llmConnections.all.first(where: { $0.id == id }),
-              let key = prompterSecrets.secret(for: id)
-        else {
-            settings.connectionCheck[id] = .failed("нет ключа")
+        guard let connection = llmConnections.all.first(where: { $0.id == id }) else { return }
+        guard let key = prompterSecrets.secret(for: id) else {
+            let present = (prompterSecrets as? KeychainStore)?.contains(id) ?? false
+            settings.connectionCheck[id] = .failed(present
+                ? "ключ сохранён, но Keychain не отдаёт его — напишите в MLaud"
+                : "нет ключа — «Изменить…» → поле «Ключ» → «Сохранить»")
             return
         }
         settings.connectionCheck[id] = .running

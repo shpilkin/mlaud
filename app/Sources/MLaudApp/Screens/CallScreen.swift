@@ -147,6 +147,59 @@ struct CallScreen: View {
         }
     }
 
+    /// Бриф = ключ к суфлёру: без него подсказчика нет (транскрипт и запись работают).
+    /// Выбор прямо в чек-листе, чтобы «Начать звонок» не молчал о причине.
+    @ViewBuilder
+    private var briefRow: some View {
+        NitiRow(bar: selectedBrief?.prompter == true ? Niti.Colors.accent : Niti.Colors.warning) {
+            HStack(spacing: Niti.Spacing.s3) {
+                Image(systemName: "doc.text")
+                    .foregroundStyle(Niti.Colors.subtle)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Бриф")
+                        .font(Niti.Typography.md)
+                        .foregroundStyle(Niti.Colors.text)
+                    Text(briefHint)
+                        .font(Niti.Typography.sm)
+                        .foregroundStyle(Niti.Colors.muted)
+                }
+                Spacer(minLength: Niti.Spacing.s2)
+                if model.briefs.isEmpty {
+                    Button("Создать…") { model.commands?.newBrief(template: "meeting") }
+                        .buttonStyle(.niti(.plain, size: .small))
+                } else {
+                    Picker("", selection: Binding(
+                        get: { model.callBriefSlug },
+                        set: { model.commands?.prepareCallBrief($0) })) {
+                        Text("без брифа").tag(String?.none)
+                        ForEach(model.briefs) { brief in
+                            Text(brief.title).tag(String?.some(brief.slug))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(width: 220)
+                }
+            }
+        }
+    }
+
+    private var selectedBrief: BriefSummary? {
+        model.briefs.first { $0.slug == model.callBriefSlug }
+    }
+
+    private var briefHint: String {
+        if model.briefs.isEmpty {
+            return "без брифа суфлёр не подсказывает — только транскрипт и запись"
+        }
+        guard let brief = selectedBrief else {
+            return "суфлёр выключен: бриф не выбран"
+        }
+        return brief.prompter
+            ? "суфлёр включится: \(brief.title)"
+            : "в брифе суфлёр выключен (поле «Суфлёр» в редакторе)"
+    }
+
     // MARK: - Содержимое по фазе
 
     @ViewBuilder
@@ -164,6 +217,7 @@ struct CallScreen: View {
         VStack(alignment: .leading, spacing: 0) {
             NitiRowSection("Перед стартом")
             VStack(spacing: 0) {
+                briefRow
                 NitiRow {
                     checkRow("Микрофон", item: call.microphone) {
                         switch call.microphone {

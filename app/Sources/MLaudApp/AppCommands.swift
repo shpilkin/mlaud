@@ -50,6 +50,7 @@ protocol AppCommands: AnyObject {
     func addMaterialFromRecordings(slug: String, base: String)
     func removeMaterial(slug: String, name: String)
     func startCall(brief slug: String)
+    func prepareCallBrief(_ slug: String?)
     func requestHint()
     func togglePrompterPause()
     func pinCard(_ id: String)

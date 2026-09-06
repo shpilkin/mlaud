@@ -29,6 +29,15 @@ final class KeychainStore: SecretStore {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Есть ли запись вообще (поиск по атрибутам, без чтения секрета): отличает
+    /// «ключа нет» от «ключ есть, но Keychain не отдаёт его этому процессу».
+    func contains(_ account: String) -> Bool {
+        var item = query(for: account)
+        item[kSecReturnAttributes as String] = true
+        var result: AnyObject?
+        return SecItemCopyMatching(item as CFDictionary, &result) == errSecSuccess
+    }
+
     func setSecret(_ value: String?, for account: String) throws {
         guard let value else {
             let status = SecItemDelete(query(for: account) as CFDictionary)
