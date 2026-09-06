@@ -53,8 +53,12 @@ struct CallScreen: View {
     /// устройство по умолчанию).
     private var toolbar: some View {
         HStack(spacing: Niti.Spacing.s3) {
-            NitiStatusPill("ВКС", tone: .accent, systemImage: "video")
-            if call.phase == .ready {
+            if call.mode == "offline" {
+                NitiStatusPill("офлайн", tone: .accent, systemImage: "iphone")
+            } else {
+                NitiStatusPill("ВКС", tone: .accent, systemImage: "video")
+            }
+            if call.phase == .ready && call.mode != "offline" {
                 Picker("", selection: appSelection) {
                     Text("без звука приложения").tag(Int32?.none)
                     ForEach(model.callApps) { app in
@@ -229,22 +233,41 @@ struct CallScreen: View {
                         }
                     }
                 }
-                NitiRow {
-                    checkRow("Звук приложения", item: call.appAudio) {
-                        switch call.appAudio {
-                        case .needsRestart:
-                            Button("Настройки") { model.commands?.openScreenRecordingSettings() }
-                                .buttonStyle(.niti(.plain, size: .small))
-                            Button("Перезапустить") { model.commands?.relaunchApp() }
-                                .buttonStyle(.niti(.primary, size: .small))
-                        case .denied:
-                            Button("Настройки") { model.commands?.openScreenRecordingSettings() }
-                                .buttonStyle(.niti(.plain, size: .small))
-                        case .unavailable:
-                            Button("Обновить") { model.commands?.refreshCallApps() }
-                                .buttonStyle(.niti(.plain, size: .small))
-                        default:
-                            EmptyView()
+                if call.mode == "offline" {
+                    NitiRow {
+                        HStack(spacing: Niti.Spacing.s3) {
+                            Image(systemName: "mic")
+                                .foregroundStyle(Niti.Colors.subtle)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Один микрофон (офлайн)")
+                                    .font(Niti.Typography.md)
+                                    .foregroundStyle(Niti.Colors.text)
+                                Text("звук приложения не нужен; кто говорит — узнаётся по голосу в этапе 5")
+                                    .font(Niti.Typography.sm)
+                                    .foregroundStyle(Niti.Colors.muted)
+                            }
+                            Spacer(minLength: 0)
+                            NitiStatusPill("не нужно", tone: .muted)
+                        }
+                    }
+                } else {
+                    NitiRow {
+                        checkRow("Звук приложения", item: call.appAudio) {
+                            switch call.appAudio {
+                            case .needsRestart:
+                                Button("Настройки") { model.commands?.openScreenRecordingSettings() }
+                                    .buttonStyle(.niti(.plain, size: .small))
+                                Button("Перезапустить") { model.commands?.relaunchApp() }
+                                    .buttonStyle(.niti(.primary, size: .small))
+                            case .denied:
+                                Button("Настройки") { model.commands?.openScreenRecordingSettings() }
+                                    .buttonStyle(.niti(.plain, size: .small))
+                            case .unavailable:
+                                Button("Обновить") { model.commands?.refreshCallApps() }
+                                    .buttonStyle(.niti(.plain, size: .small))
+                            default:
+                                EmptyView()
+                            }
                         }
                     }
                 }
@@ -384,7 +407,9 @@ struct CallScreen: View {
             HStack(spacing: Niti.Spacing.s4) {
                 recognizerStatus
                 NitiLevelMeter(level: call.levels.me, label: "Я")
-                NitiLevelMeter(level: call.levels.them, label: "Собеседник")
+                if call.mode != "offline" {
+                    NitiLevelMeter(level: call.levels.them, label: "Собеседник")
+                }
                 Text("запись \(NitiTimerLabel.clock(call.recordedSec))")
                     .font(Niti.Typography.sm)
                     .foregroundStyle(Niti.Colors.subtle)

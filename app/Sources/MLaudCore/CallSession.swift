@@ -5,6 +5,7 @@ import Foundation
 public final class CallSession {
     public enum Input {
         case prepare(callID: String, title: String)
+        case captureMode(String)                    // vks | offline; из брифа при prepare
         case devices(input: String?, output: String?, app: String?)
         case checklist(microphone: CheckItem, appAudio: CheckItem)
         case headphones(Bool)
@@ -56,6 +57,8 @@ public final class CallSession {
             }
             s.callID = callID
             s.title = title
+        case .captureMode(let mode):
+            s.mode = mode
         case .devices(let input, let output, let app):
             s.inputDeviceName = input
             s.outputDeviceName = output

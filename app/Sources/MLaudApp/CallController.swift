@@ -95,6 +95,7 @@ final class CallController {
     /// Бриф экрана звонка: заголовок, имя собеседника в сайдкар и call.json (закрывает S3B D3).
     func prepare(brief: (slug: String, brief: Brief)?) {
         self.brief = brief
+        session.apply(.captureMode(brief?.brief.mode ?? "vks"))
         guard phase == .idle || phase == .ready else { return }
         if phase == .idle {
             session.apply(.prepare(callID: ChannelsSidecar.callID(startedAt: deps.now()),

@@ -115,6 +115,7 @@ public struct CallSnapshot: Equatable, Sendable {
     public var recordedSec: TimeInterval = 0
     public var result: URL? = nil                  // .m4a в inbox после finishing
     public var error: String? = nil
+    public var mode = "vks"                         // vks | offline — из брифа (FR-12.11)
     public var prompter = PrompterSnapshot()       // последним полем: значение по умолчанию сохраняет равенство CallSnapshot() в старых тестах
     public init() {}
     public var canStart: Bool { phase == .ready && microphone == .ok }   // звук приложения может отсутствовать (FR-12.16)
