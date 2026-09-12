@@ -166,6 +166,27 @@ final class CallController {
 
     func requestDetail(_ cardID: String) { prompter?.detail(cardID: cardID) }
 
+    /// Ретро-исправление метки (этап 5): клик по строке ленты в офлайне перекладывает реплику
+    /// «Я» ↔ «не я» — голос мог не узнать или узнать неверно. Строка, ставшая «не я», уходит
+    /// суфлёру ходом, как если бы голос узнался сразу (forwardPhrases её уже пропустил).
+    func relabelLine(id: Int) {
+        guard offline, phase == .running, let transcript else { return }
+        guard let line = transcript.relabel(id: id) else { return }
+        if line.ch == .them {
+            prompter?.phrase(line, allLines: transcript.lines, elapsed: session.snapshot.elapsed,
+                             agendaManual: session.snapshot.prompter.agenda,
+                             notes: session.snapshot.prompter.notes)
+        }
+    }
+
+    /// ⌘⇧S: последняя фраза — собеседник; уже помеченные «не я» не трогает.
+    func markLastLineThem() {
+        guard offline, phase == .running, let transcript else { return }
+        if let last = transcript.lines.last, last.ch == .me {
+            relabelLine(id: last.id)
+        }
+    }
+
     // MARK: - Подготовка
 
     /// idle → ready: чек-лист (микрофон, звук приложения), устройства, наушники.

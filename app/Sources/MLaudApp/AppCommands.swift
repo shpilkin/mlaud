@@ -54,6 +54,8 @@ protocol AppCommands: AnyObject {
     func recordSelfVoice()
     func cancelSelfVoiceRecording()
     func requestHint()
+    func relabelTranscriptLine(id: Int)
+    func markLastTranscriptLineThem()
     func togglePrompterPause()
     func pinCard(_ id: String)
     func unpinCard(_ id: String)

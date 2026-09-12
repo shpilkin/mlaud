@@ -15,11 +15,6 @@ private func spinUntil(timeout: TimeInterval = 60, _ done: () -> Bool) -> Bool {
 }
 
 func runOfflineTests() {
-    let fixtures = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent().deletingLastPathComponent()
-        .deletingLastPathComponent().deletingLastPathComponent()
-        .appendingPathComponent("worker/tests/fixtures", isDirectory: true)
-
     test("OfflineVoicePolicy: свои — Я, чужие — не я, короткие — ?") {
         let mine = ChannelPhrase(phrase: 1, t0: 0, t1: 3, text: "я", reason: "silence",
                                  windowSec: 3, decodes: 1, voice: VoiceMark(isSelf: true, score: 0.71))
@@ -69,6 +64,49 @@ func runOfflineTests() {
         eq(transcript.lines.last?.label, "не я", "метка переопределена")
         let text = try String(contentsOf: file, encoding: .utf8)
         check(text.contains(#""label":"не я""#), "файл с переопределённой меткой")
+    }
+
+    test("LiveTranscript.relabel: «Я» ↔ «не я», запись переноса в файл, порядок сохраняется") {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("live-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let transcript = LiveTranscript(labels: [.me: "Я", .them: "не я"], fileURL: file)
+        transcript.open(.me, offset: 0)
+        let mine = ChannelPhrase(phrase: 1, t0: 0, t1: 3, text: "кажется, я", reason: "silence",
+                                 windowSec: 3, decodes: 1,
+                                 voice: VoiceMark(isSelf: true, score: 0.8))
+        transcript.apply(.me, .phrase(mine), label: "Я")
+        let short = ChannelPhrase(phrase: 2, t0: 3, t1: 4, text: "угу", reason: "silence",
+                                  windowSec: 1, decodes: 1, voice: nil)
+        transcript.apply(.me, .phrase(short), label: "?")
+        let id = transcript.lines[0].id
+        var changes = 0
+        transcript.onChange = { changes += 1 }
+
+        let flipped = transcript.relabel(id: id)
+        eq(flipped?.ch, .them, "исправленная строка — собеседник")
+        eq(flipped?.label, "не я", "метка сменилась")
+        eq(transcript.lines[0].ch, .them, "строка переложена в ленте")
+        eq(transcript.lines[0].id, id, "id и позиция не изменились")
+        eq(transcript.lines[0].text, "кажется, я", "текст не тронут")
+
+        let back = transcript.relabel(id: id)
+        eq(back?.ch, .me, "повторный клик возвращает")
+        eq(back?.label, "Я", "метка вернулась")
+
+        eq(transcript.relabel(id: transcript.lines[1].id)?.label, "не я",
+           "короткая «?» тоже перекладывается")
+        check(transcript.relabel(id: 999) == nil, "несуществующий id — nil")
+        eq(changes, 3, "onChange на каждое исправление")
+
+        let text = try String(contentsOf: file, encoding: .utf8)
+        let rows = text.split(separator: "\n")
+        eq(rows.count, 5, "две реплики и три переноса")
+        check(rows[2].contains(#""t":"relabel""#) && rows[2].contains(#""from":"me""#),
+              "перенос помечен и несёт прежний канал")
+        check(rows[2].contains(#""label":"не я""#), "перенос несёт новую метку")
+        check(rows[4].contains(#""from":"me""#) && rows[4].contains(#""text":"угу""#),
+              "перенос короткой фразы опознаваем по тексту")
     }
 
     test("CallRecorder: моно без сайдкара — wav 1 канал, m4a в inbox, сайдкара нет") {

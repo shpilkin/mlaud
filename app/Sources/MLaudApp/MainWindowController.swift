@@ -120,9 +120,15 @@ enum MainMenu {
         call.target = delegate
         actions.addItem(call)
         // Этап 4 (§4.6): ⌘↩ валиден при идущем звонке; валидацию делает AppDelegate.
-        let hint = NSMenuItem(title: "Суфлёр: подсказать", action: Selector(("requestHint")), keyEquivalent: "\r")
+        let hint = NSMenuItem(title: "Суфлёр: подсказать", action: #selector(AppDelegate.requestHint), keyEquivalent: "\r")
         hint.target = delegate
         actions.addItem(hint)
+        // Этап 5: ретро-исправление метки — последняя фраза в «не я» (клик по строке ленты).
+        let markThem = NSMenuItem(title: "Суфлёр: последняя фраза — собеседник",
+                                  action: #selector(AppDelegate.markLastTranscriptLineThem), keyEquivalent: "s")
+        markThem.keyEquivalentModifierMask = [.command, .shift]
+        markThem.target = delegate
+        actions.addItem(markThem)
         let dictation = NSMenuItem(title: "Диктовка: начать / закончить", action: #selector(AppDelegate.toggleDictation), keyEquivalent: "")
         dictation.target = delegate
         actions.addItem(dictation)

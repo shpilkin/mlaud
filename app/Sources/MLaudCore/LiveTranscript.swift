@@ -74,6 +74,30 @@ public final class LiveTranscript {
             + "\"t0\":\(JSONText.number(t0)),\"t1\":\(JSONText.number(t1)),\"text\":\(JSONText.quoted(text))}"
     }
 
+    /// Ретро-исправление метки (этап 5): пометка голоса могла ошибиться — строку можно
+    /// переложить в другой канал («Я» ↔ «не я»). Id, время и порядок ленты не меняются;
+    /// в файл дописывается запись переноса. Возвращает строку в новом виде.
+    @discardableResult
+    public func relabel(id: Int) -> TranscriptLine? {
+        guard let index = lines.firstIndex(where: { $0.id == id }) else { return nil }
+        let old = lines[index]
+        let target: CallChannel = old.ch == .them ? .me : .them
+        let updated = TranscriptLine(id: old.id, ch: target, label: labels[target] ?? target.defaultLabel,
+                                     t0: old.t0, t1: old.t1, text: old.text)
+        lines[index] = updated
+        write(Self.encodeRelabel(from: old.ch, to: updated))
+        onChange?()
+        return updated
+    }
+
+    /// Запись переноса для `transcript.live.jsonl`: у реплик в файле нет id, поэтому
+    /// строка описана временем и текстом, `from` — канал до исправления.
+    public static func encodeRelabel(from ch: CallChannel, to line: TranscriptLine) -> String {
+        "{\"t\":\"relabel\",\"from\":\(JSONText.quoted(ch.rawValue)),\"ch\":\(JSONText.quoted(line.ch.rawValue)),"
+            + "\"label\":\(JSONText.quoted(line.label)),\"t0\":\(JSONText.number(line.t0)),"
+            + "\"t1\":\(JSONText.number(line.t1)),\"text\":\(JSONText.quoted(line.text))}"
+    }
+
     /// Бинарная вставка по t0; при равенстве — после существующих.
     private func insert(_ line: TranscriptLine) {
         var lo = 0

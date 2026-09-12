@@ -1407,8 +1407,16 @@ extension AppDelegate: AppCommands {
         }
     }
 
-    func requestHint() {
+    @objc func requestHint() {
         call?.requestHint()
+    }
+
+    func relabelTranscriptLine(id: Int) {
+        call?.relabelLine(id: id)
+    }
+
+    @objc func markLastTranscriptLineThem() {
+        call?.markLastLineThem()
     }
 
     func togglePrompterPause() {
@@ -1502,7 +1510,7 @@ extension AppDelegate: AppCommands {
         }
     }
 
-    func toggleCompactPanel() {
+    @objc func toggleCompactPanel() {
         if compactPanel == nil { compactPanel = CompactPanelController(model: model) }
         compactPanel?.toggle()
     }

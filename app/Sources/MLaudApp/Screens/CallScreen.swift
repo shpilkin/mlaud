@@ -380,12 +380,25 @@ struct CallScreen: View {
 
     private var running: some View {
         HStack(alignment: .top, spacing: Niti.Spacing.s4) {
-            TranscriptFeed(lines: call.lines, tails: call.tails)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(alignment: .leading, spacing: Niti.Spacing.s2) {
+                TranscriptFeed(lines: call.lines, tails: call.tails, onRelabel: relabelHandler)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if relabelHandler != nil {
+                    Text("Стрелка ⇄ у строки меняет «Я» ↔ «не я» · ⌘⇧S — последняя фраза собеседника")
+                        .font(Niti.Typography.xs)
+                        .foregroundStyle(Niti.Colors.muted)
+                        .padding(.horizontal, Niti.Spacing.s3)
+                }
+            }
             PrompterColumn(model: model)
                 .frame(width: 380)
                 .frame(maxHeight: .infinity, alignment: .top)
         }
+    }
+
+    /// Этап 5: в офлайне метка строки — догадка по голосу, клик её исправляет.
+    private var relabelHandler: ((Int) -> Void)? {
+        call.mode == "offline" ? { model.commands?.relabelTranscriptLine(id: $0) } : nil
     }
 
     private var finishing: some View {
@@ -537,10 +550,12 @@ struct CallScreen: View {
 
 /// Лента транскрипта: строки по времени, говорящий цветом («Я» — accent, собеседник —
 /// delegated), хвосты текущих фраз серым; автопрокрутка к концу, отпускается, когда
-/// пользователь отмотал вверх, и возвращается у нижнего края.
+/// пользователь отмотал вверх, и возвращается у нижнего края. В офлайне у строки при
+/// наведении появляется ⇄: `onRelabel` перекладывает её «Я» ↔ «не я» (голос мог ошибиться).
 private struct TranscriptFeed: View {
     let lines: [TranscriptLine]
     let tails: [CallChannel: String]
+    var onRelabel: ((Int) -> Void)?
     @State private var followsTail = true
 
     private static let bottomID = "tail"
@@ -556,11 +571,12 @@ private struct TranscriptFeed: View {
                             .padding(.vertical, Niti.Spacing.s3)
                     }
                     ForEach(lines) { line in
-                        row(time: line.t0, ch: line.ch, label: line.label, text: line.text, tail: false)
+                        Row(time: line.t0, ch: line.ch, label: line.label, text: line.text, tail: false,
+                            onTap: onRelabel.map { handler in { handler(line.id) } })
                     }
                     ForEach(CallChannel.allCases, id: \.self) { ch in
                         if let tail = tails[ch], !tail.isEmpty {
-                            row(time: nil, ch: ch, label: ch.defaultLabel, text: tail, tail: true)
+                            Row(time: nil, ch: ch, label: ch.defaultLabel, text: tail, tail: true, onTap: nil)
                         }
                     }
                     Color.clear.frame(height: 1).id(Self.bottomID)
@@ -590,28 +606,54 @@ private struct TranscriptFeed: View {
         proxy.scrollTo(Self.bottomID, anchor: .bottom)
     }
 
-    private func row(time: Double?, ch: CallChannel, label: String, text: String, tail: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: Niti.Spacing.s2) {
-            Text(time.map(NitiTimerLabel.clock) ?? "")
-                .font(Niti.Typography.sm)
-                .foregroundStyle(Niti.Colors.muted)
-                .monospacedDigit()
-                .lineLimit(1)
-                .frame(width: 52, alignment: .leading)   // «9:59:59» табличными цифрами 12 pt — 44.9 pt
-            Text(label)
-                .font(Niti.Typography.sm)
-                .fontWeight(Niti.Weight.semibold)
-                .foregroundStyle(ch == .me ? Niti.Colors.accent : Niti.Colors.delegated)
-                .lineLimit(1)
-                .frame(width: 90, alignment: .leading)
-            Text(text)
-                .font(Niti.Typography.base)
-                .foregroundStyle(tail ? Niti.Colors.muted : Niti.Colors.text)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private struct Row: View {
+        let time: Double?
+        let ch: CallChannel
+        let label: String
+        let text: String
+        let tail: Bool
+        let onTap: (() -> Void)?
+        @State private var hovering = false
+
+        var body: some View {
+            HStack(alignment: .firstTextBaseline, spacing: Niti.Spacing.s2) {
+                Text(time.map(NitiTimerLabel.clock) ?? "")
+                    .font(Niti.Typography.sm)
+                    .foregroundStyle(Niti.Colors.muted)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .frame(width: 52, alignment: .leading)   // «9:59:59» табличными цифрами 12 pt — 44.9 pt
+                Text(label)
+                    .font(Niti.Typography.sm)
+                    .fontWeight(Niti.Weight.semibold)
+                    .foregroundStyle(ch == .me ? Niti.Colors.accent : Niti.Colors.delegated)
+                    .lineLimit(1)
+                    .frame(width: 90, alignment: .leading)
+                Text(text)
+                    .font(Niti.Typography.base)
+                    .foregroundStyle(tail ? Niti.Colors.muted : Niti.Colors.text)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let onTap {
+                    // Кнопка вместо тапа по строке: выделяемый текст перехватывает клик.
+                    Button(action: onTap) {
+                        Image(systemName: "arrow.left.arrow.right")
+                            .font(Niti.Typography.base)
+                            .foregroundStyle(Niti.Colors.subtle)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: 22)
+                    .opacity(hovering ? 1 : 0)
+                    .help("Поменять «Я» ↔ «не я»")
+                }
+            }
+            .padding(.horizontal, Niti.Spacing.s3)
+            .padding(.vertical, onTap == nil ? 0 : Niti.Spacing.s1)
+            .background(hovering && onTap != nil ? Niti.Colors.chip : Color.clear,
+                        in: RoundedRectangle(cornerRadius: Niti.Radius.base, style: .continuous))
+            .onHover { hovering = $0 }
         }
-        .padding(.horizontal, Niti.Spacing.s3)
     }
 }
 
