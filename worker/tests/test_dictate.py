@@ -526,6 +526,40 @@ def test_open_without_voice_no_field():
     assert len(phrase) == 1 and "voice" not in phrase[0]
 
 
+class ExplodingVoice:
+    """Маркер, чей эмбеддер падает (живой баг numpy/torch): фраза жить не должна переставать."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def mark(self, samples):
+        self.calls += 1
+        raise RuntimeError("'numpy.ndarray' object has no attribute 'to'")
+
+
+def test_voice_crash_closes_phrase_without_mark():
+    """Эмбеддер упал на закрытии фразы — фраза закрывается без пометки, ошибка
+    каналом один раз, пометка выключается до конца сессии (не краш на каждом тике)."""
+    voice = ExplodingVoice()
+    reg = _voice_registry({"me": FakeDecoder({0.4: "первая фраза"})}, loader=lambda: voice)
+    assert reg.handle({"t": "open", "ch": "me", "label": "Я", "voice": True}) == []
+    closed = _feed_pcm(reg, "me", _speech(3.0))
+    closed += _feed_pcm(reg, "me", _silence(0.6))
+    phrase = [e for e in closed if e["t"] == "phrase"]
+    errors = [e for e in closed if e["t"] == "error"]
+    assert len(phrase) == 1, "фраза закрылась вопреки падению маркера"
+    assert "voice" not in phrase[0]
+    assert len(errors) == 1 and "numpy" in errors[0]["message"]
+    # вторая фраза: пометка уже выключена — ни ошибки, ни пометки
+    closed2 = _feed_pcm(reg, "me", _speech(3.0))
+    closed2 += _feed_pcm(reg, "me", _silence(0.6))
+    phrase2 = [e for e in closed2 if e["t"] == "phrase"]
+    errors2 = [e for e in closed2 if e["t"] == "error"]
+    assert len(phrase2) == 1 and "voice" not in phrase2[0]
+    assert errors2 == []
+    assert voice.calls == 1
+
+
 def test_open_voice_without_self_person_is_error():
     """Флаг есть, персоны «Я» в базе нет — ошибка каналом, сессия не создаётся."""
     reg = _voice_registry({"me": FakeDecoder({})}, loader=lambda: None)

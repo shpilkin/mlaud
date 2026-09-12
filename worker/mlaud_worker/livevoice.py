@@ -76,8 +76,9 @@ def _cpu_embedder() -> Callable[[np.ndarray], np.ndarray]:
     inference = Inference(model, window="whole", device=torch.device("cpu"))
 
     def embed(samples: np.ndarray) -> np.ndarray:
-        wave = samples.reshape(1, -1)
-        out = np.asarray(inference({"waveform": wave, "sample_rate": SR}))
-        return out.reshape(-1)
+        # Inference.infer делает chunks.to(device) — на вход нужен тензор, numpy там падает.
+        wave = torch.from_numpy(np.ascontiguousarray(samples.reshape(1, -1)))
+        out = inference({"waveform": wave, "sample_rate": SR})
+        return np.asarray(out).reshape(-1)
 
     return embed

@@ -262,9 +262,16 @@ class DictationSession:
                 phrase = self._event("phrase", t0=t0, t1=t1, text=text, reason=reason,
                                      window_sec=window_sec, decodes=decodes)
                 if self.voice is not None and self._window.size:
-                    mark = self.voice.mark(self._window)
-                    if mark is not None:
-                        phrase["voice"] = mark
+                    try:
+                        mark = self.voice.mark(self._window)
+                    except Exception as exc:
+                        # Эмбеддер упал — фраза всё равно закрывается, без пометки;
+                        # пометка выключается до конца сессии, иначе краш на каждом тике.
+                        events.append(self._event("error", message=f"voice: {exc}"))
+                        self.voice = None
+                    else:
+                        if mark is not None:
+                            phrase["voice"] = mark
                 events.append(phrase)
                 self.phrase += 1
         self.reset()
