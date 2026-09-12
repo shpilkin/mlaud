@@ -33,13 +33,20 @@ struct BriefEditorScreen: View {
         }
     }
 
+    /// Любая правка поля планирует сохранение: без этого «Режим захвата» и прочие
+    /// пикеры жили только в памяти и терялись к следующему открытию.
+    private func saved<T>(_ value: Binding<T>, of brief: Binding<Brief>) -> Binding<T> {
+        Binding(get: { value.wrappedValue },
+                set: { value.wrappedValue = $0; scheduleSave(brief) })
+    }
+
     @ViewBuilder
     private func briefForm(_ brief: Binding<Brief>) -> some View {
         NitiFormRow("Название") {
-            TextField("", text: brief.title).textFieldStyle(.roundedBorder)
+            TextField("", text: saved(brief.title, of: brief)).textFieldStyle(.roundedBorder)
         }
         NitiFormRow("Шаблон") {
-            Picker("", selection: brief.template) {
+            Picker("", selection: saved(brief.template, of: brief)) {
                 ForEach(model.templates.isEmpty ? BriefStore.templateSlugs : model.templates, id: \.self) { slug in
                     Text(slug).tag(slug)
                 }
@@ -47,22 +54,22 @@ struct BriefEditorScreen: View {
             .pickerStyle(.menu).labelsHidden().frame(width: 160)
         }
         NitiFormRow("Режим захвата") {
-            Picker("", selection: brief.mode) {
+            Picker("", selection: saved(brief.mode, of: brief)) {
                 Text("ВКС (два канала)").tag("vks")
                 Text("офлайн (один микрофон)").tag("offline")
             }
             .pickerStyle(.radioGroup)
         }
         NitiFormRow("Ожидаемая длительность, мин") {
-            Stepper(value: brief.expectedMin, in: 5...480, step: 5) {
+            Stepper(value: saved(brief.expectedMin, of: brief), in: 5...480, step: 5) {
                 Text("\(brief.wrappedValue.expectedMin)").font(Niti.Typography.base)
             }
         }
         NitiFormRow("Собеседник", hint: "до запятой — имя для подписи канала") {
-            TextField("", text: brief.counterpart).textFieldStyle(.roundedBorder)
+            TextField("", text: saved(brief.counterpart, of: brief)).textFieldStyle(.roundedBorder)
         }
         NitiFormRow("Цель") {
-            TextField("", text: brief.goal, axis: .vertical)
+            TextField("", text: saved(brief.goal, of: brief), axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...3)
         }
@@ -70,8 +77,8 @@ struct BriefEditorScreen: View {
             VStack(alignment: .leading, spacing: Niti.Spacing.s2) {
                 ForEach(brief.agenda.indices, id: \.self) { index in
                     HStack {
-                        TextField("", text: brief.agenda[index].text).textFieldStyle(.roundedBorder)
-                        TextField("мин", value: brief.agenda[index].planMin, formatter: NumberFormatter())
+                        TextField("", text: saved(brief.agenda[index].text, of: brief)).textFieldStyle(.roundedBorder)
+                        TextField("мин", value: saved(brief.agenda[index].planMin, of: brief), formatter: NumberFormatter())
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 54)
                         Button {
@@ -93,10 +100,10 @@ struct BriefEditorScreen: View {
             }
         }
         NitiFormRow("Суфлёр") {
-            Toggle("Включён для этого брифа", isOn: brief.prompter).toggleStyle(.checkbox)
+            Toggle("Включён для этого брифа", isOn: saved(brief.prompter, of: brief)).toggleStyle(.checkbox)
         }
         NitiFormRow("Модель", hint: "подключение из настроек; «default» — по умолчанию") {
-            Picker("", selection: brief.model) {
+            Picker("", selection: saved(brief.model, of: brief)) {
                 Text("default").tag("default")
                 ForEach(model.settings.connections) { connection in
                     Text(connection.name).tag(connection.name)
@@ -114,13 +121,12 @@ struct BriefEditorScreen: View {
     @ViewBuilder
     private func sectionEditor(_ title: String, _ brief: Binding<Brief>, key: String) -> some View {
         NitiFormRow(title) {
-            TextEditor(text: Binding(
+            TextEditor(text: saved(Binding(
                 get: { brief.wrappedValue.sections[key] ?? "" },
-                set: { brief.wrappedValue.sections[key] = $0; scheduleSave(brief) }))
+                set: { brief.wrappedValue.sections[key] = $0 }), of: brief))
                 .font(Niti.Typography.base)
                 .frame(width: 380, height: 84)
                 .border(Niti.Colors.border)
-                .onChange(of: brief.wrappedValue.sections[key] ?? "") { scheduleSave(brief) }
         }
     }
 

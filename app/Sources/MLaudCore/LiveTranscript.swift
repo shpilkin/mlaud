@@ -39,8 +39,9 @@ public final class LiveTranscript {
     }
 
     /// `label` — переопределить метку строки (этап 5: офлайн кладёт реплики одного микрофона
-    /// в два канала по пометке голоса; неопознанные короткие — «?»).
-    public func apply(_ ch: CallChannel, _ event: ChannelEvent, label: String?) {
+    /// в два канала по пометке голоса; неопознанные короткие — «?»). `voiceScore` — косинус
+    /// к эталону «я» из события `phrase`, в журнал и только для разбора ошибок пометки.
+    public func apply(_ ch: CallChannel, _ event: ChannelEvent, label: String?, voiceScore: Double? = nil) {
         var gen = generations[ch] ?? Generation()
         switch event {
         case .commit(_, let text):
@@ -57,7 +58,8 @@ public final class LiveTranscript {
                 let line = TranscriptLine(id: nextID, ch: ch, label: lineLabel,
                                           t0: gen.offset + phrase.t0, t1: gen.offset + phrase.t1, text: phrase.text)
                 insert(line)
-                write(Self.encodeLine(ch: ch, label: lineLabel, t0: line.t0, t1: line.t1, text: line.text))
+                write(Self.encodeLine(ch: ch, label: lineLabel, t0: line.t0, t1: line.t1,
+                                      text: line.text, voice: voiceScore))
             }
         case .error:
             return
@@ -68,10 +70,15 @@ public final class LiveTranscript {
         onChange?()
     }
 
-    /// Строка §3.3 без "\n".
-    public static func encodeLine(ch: CallChannel, label: String, t0: Double, t1: Double, text: String) -> String {
-        "{\"ch\":\(JSONText.quoted(ch.rawValue)),\"label\":\(JSONText.quoted(label)),"
+    /// Строка §3.3 без "\n"; `voice` — только у офлайн-реплик с пометкой голоса.
+    public static func encodeLine(ch: CallChannel, label: String, t0: Double, t1: Double, text: String,
+                                  voice: Double? = nil) -> String {
+        var line = "{\"ch\":\(JSONText.quoted(ch.rawValue)),\"label\":\(JSONText.quoted(label)),"
             + "\"t0\":\(JSONText.number(t0)),\"t1\":\(JSONText.number(t1)),\"text\":\(JSONText.quoted(text))}"
+        if let voice {
+            line += ",\"voice\":\(JSONText.number(voice))"
+        }
+        return line
     }
 
     /// Ретро-исправление метки (этап 5): пометка голоса могла ошибиться — строку можно

@@ -204,6 +204,41 @@ struct CallScreen: View {
         }
     }
 
+    /// Режим без брифа: с брифом его задаёт редактор брифа, без — выбор здесь.
+    @ViewBuilder
+    private var modeRow: some View {
+        NitiRow(bar: call.mode == "offline" ? Niti.Colors.accent : Niti.Colors.muted) {
+            HStack(spacing: Niti.Spacing.s3) {
+                Image(systemName: "waveform")
+                    .foregroundStyle(Niti.Colors.subtle)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Режим")
+                        .font(Niti.Typography.md)
+                        .foregroundStyle(Niti.Colors.text)
+                    Text(modeHint)
+                        .font(Niti.Typography.sm)
+                        .foregroundStyle(Niti.Colors.muted)
+                }
+                Spacer(minLength: Niti.Spacing.s2)
+                Picker("", selection: Binding(
+                    get: { call.mode },
+                    set: { model.commands?.setCallMode($0) })) {
+                    Text("ВКС (два канала)").tag("vks")
+                    Text("офлайн (один микрофон)").tag("offline")
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 220)
+            }
+        }
+    }
+
+    private var modeHint: String {
+        call.mode == "offline"
+            ? "один микрофон: реплики делятся по голосу «Я / не я» (нужен эталон)"
+            : "микрофон + звук приложения: каналы раздельные, голос не анализируется"
+    }
+
     /// Бриф = ключ к суфлёру: без него подсказчика нет (транскрипт и запись работают).
     /// Выбор прямо в чек-листе, чтобы «Начать звонок» не молчал о причине.
     @ViewBuilder
@@ -278,6 +313,9 @@ struct CallScreen: View {
                     selfVoiceRow
                 }
                 briefRow
+                if model.callBriefSlug == nil {
+                    modeRow
+                }
                 NitiRow {
                     checkRow("Микрофон", item: call.microphone) {
                         switch call.microphone {

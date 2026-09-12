@@ -51,7 +51,11 @@ public final class CallSession {
         case .prepare(let callID, let title):
             // Из idle — новый снимок; в ready — только обновить id и заголовок (callID рождается при старте, §4.4).
             switch s.phase {
-            case .idle: s = CallSnapshot(); s.phase = .ready
+            case .idle:
+                let mode = s.mode   // captureMode приходит до prepare; сброс снимка его не должен съедать
+                s = CallSnapshot()
+                s.phase = .ready
+                s.mode = mode
             case .ready: break
             default: return
             }

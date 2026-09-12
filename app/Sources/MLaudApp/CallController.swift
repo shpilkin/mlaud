@@ -107,6 +107,12 @@ final class CallController {
         }
     }
 
+    /// Режим звонка без брифа: выбор на экране (готов). С брифом режим задаёт бриф.
+    func setMode(_ mode: String) {
+        guard phase == .idle || phase == .ready else { return }
+        session.apply(.captureMode(mode))
+    }
+
     private func handlePrompterEvent(_ event: PrompterEvent) {
         switch event {
         case .cards(_, _, _, _, let usage, let firstCardMs, _, _, _):
@@ -557,7 +563,7 @@ final class CallController {
                 // Этап 5: физический канал один; метка строки — по голосу (S4), свои — «Я»,
                 // чужие — «не я», короче 2 с — «?». Ход суфлёра триггерят «не я»-фразы (them).
                 let routed = OfflineVoicePolicy.route(phrase)
-                transcript.apply(routed.ch, event, label: routed.label)
+                transcript.apply(routed.ch, event, label: routed.label, voiceScore: phrase.voice?.score)
             } else {
                 transcript.apply(channel, event)
             }

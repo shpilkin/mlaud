@@ -59,11 +59,12 @@ func runOfflineTests() {
         let phrase = ChannelPhrase(phrase: 1, t0: 0, t1: 3, text: "не моё", reason: "silence",
                                    windowSec: 3, decodes: 1,
                                    voice: VoiceMark(isSelf: false, score: 0.3))
-        transcript.apply(.them, .phrase(phrase), label: "не я")
+        transcript.apply(.them, .phrase(phrase), label: "не я", voiceScore: 0.3)
         eq(transcript.lines.last?.ch, .them, "реплика легла в канал собеседника")
         eq(transcript.lines.last?.label, "не я", "метка переопределена")
         let text = try String(contentsOf: file, encoding: .utf8)
         check(text.contains(#""label":"не я""#), "файл с переопределённой меткой")
+        check(text.contains(#""voice":0.3"#), "оценка голоса дописана в журнал")
     }
 
     test("LiveTranscript.relabel: «Я» ↔ «не я», запись переноса в файл, порядок сохраняется") {
@@ -107,6 +108,18 @@ func runOfflineTests() {
         check(rows[2].contains(#""label":"не я""#), "перенос несёт новую метку")
         check(rows[4].contains(#""from":"me""#) && rows[4].contains(#""text":"угу""#),
               "перенос короткой фразы опознаваем по тексту")
+    }
+
+    test("CallSession: режим без брифа — captureMode до и после prepare") {
+        let session = CallSession(now: { Date() })
+        eq(session.snapshot.mode, "vks", "по умолчанию ВКС")
+        session.apply(.captureMode("offline"))
+        eq(session.snapshot.mode, "offline", "режим задан до prepare")
+        session.apply(.prepare(callID: "2026-09-12_21-00-00", title: "Звонок"))
+        eq(session.snapshot.phase, .ready, "подготовка прошла")
+        eq(session.snapshot.mode, "offline", "режим пережил prepare из ready")
+        session.apply(.captureMode("vks"))
+        eq(session.snapshot.mode, "vks", "режим меняется и в ready")
     }
 
     test("CallRecorder: моно без сайдкара — wav 1 канал, m4a в inbox, сайдкара нет") {

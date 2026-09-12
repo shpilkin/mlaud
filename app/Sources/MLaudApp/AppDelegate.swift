@@ -1400,11 +1400,21 @@ extension AppDelegate: AppCommands {
     func prepareCallBrief(_ slug: String?) {
         guard let controller = callController() else { return }
         model.callBriefSlug = slug
-        if let slug, let brief = try? BriefStore.load(paths: prompterPaths, slug: slug) {
-            controller.prepare(brief: (slug, brief))
-        } else {
-            controller.prepare(brief: nil)
+        // Открытый редактор старше диска: сохранение с дебаунсом могло не успеть —
+        // «Начать звонок» сразу после смены режима не должен получить старый brief.md.
+        if let slug {
+            let brief = (slug == model.editingBriefSlug ? model.editingBrief : nil)
+                ?? (try? BriefStore.load(paths: prompterPaths, slug: slug))
+            if let brief {
+                controller.prepare(brief: (slug, brief))
+                return
+            }
         }
+        controller.prepare(brief: nil)
+    }
+
+    func setCallMode(_ mode: String) {
+        callController()?.setMode(mode)
     }
 
     @objc func requestHint() {
