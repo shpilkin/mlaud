@@ -123,7 +123,7 @@ struct CallScreen: View {
             NitiBanner(CallConsent.line, tone: .info, systemImage: "record.circle")
         }
         if call.mode == "offline", !model.selfVoiceReady {
-            NitiBanner("Живая пометка «Я / не я» выключена: в базе голосов нет персоны «я» — все реплики будут «Я». Эталон записывается до звонка: 45 с без длинных пауз.",
+            NitiBanner("Живая пометка «Я / не я» выключена: в базе голосов нет персоны «я» — все реплики будут «Я». Эталон: 45 с обычным разговорным голосом, с обычного места — как будете говорить в звонке.",
                        tone: .warn, systemImage: "person.crop.circle.badge.exclamationmark")
         }
         prompterBanners
@@ -180,7 +180,7 @@ struct CallScreen: View {
                         .foregroundStyle(Niti.Colors.text)
                     Text(model.selfVoiceReady
                          ? "эталон в базе: реплики будут помечаться «Я / не я»"
-                         : "без эталона все реплики останутся «Я»: 45 с без пауз — и база готова")
+                         : "без эталона все реплики останутся «Я»: 45 с обычным разговорным голосом с обычного места")
                         .font(Niti.Typography.sm)
                         .foregroundStyle(Niti.Colors.muted)
                 }
