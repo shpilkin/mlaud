@@ -45,6 +45,10 @@ final class PrompterController {
     func prepare(brief: Brief?, briefSlug: String?, callDir: URL, mode: String,
                  connections: LLMConnectionsStore, secrets: SecretStore,
                  limits: PrompterCommand.Limits) {
+        // Новый звонок — счётчики с нуля: id строк ленты начинаются заново, живущий
+        // через звонки lastSentID делал второй звонок глухим (реплики не отправлялись).
+        lastSentID = nil
+        lastSentAgenda = []
         let decision = PrompterPolicy.startDecision(brief: brief, connections: connections,
                                                     hasKey: { secrets.secret(for: $0) != nil })
         switch decision {
@@ -136,11 +140,17 @@ final class PrompterController {
         PrompterPolicy.linesSince(session.snapshot.lines, lastSentID: lastSentID)
     }
 
-    private func fire(reason: PrompterCommand.TurnReason) {
+    /// `forcing` — строки, обязанные попасть в ход, даже если уже отправлялись:
+    /// ретро-исправление (⇄) поднимает старую реплику, её id ниже счётчика.
+    private func fire(reason: PrompterCommand.TurnReason, forcing: [TranscriptLine] = []) {
         guard live else { return }
-        let lines = newLines()
+        var lines = newLines()
+        for extra in forcing where !lines.contains(where: { $0.id == extra.id }) {
+            lines.append(extra)
+        }
+        lines.sort { $0.t0 < $1.t0 }
         if let last = lines.last {
-            lastSentID = last.id
+            lastSentID = max(lastSentID ?? 0, last.id)
         }
         let snapshot = session.snapshot.prompter
         let agendaManual = snapshot.agenda.filter { current in
@@ -154,11 +164,12 @@ final class PrompterController {
                    notes: snapshot.notes.joined(separator: "\n")))
     }
 
-    /// Закрытая фраза: them → ход, me — только копится (D18).
+    /// Закрытая фраза: them → ход, me — только копится (D18). Строка уходит в ход явно:
+    /// при ретро-исправлении она уже ниже счётчика отправленных.
     func phrase(_ line: TranscriptLine, allLines: [TranscriptLine], elapsed: TimeInterval,
                 agendaManual: [AgendaItem], notes: [String]) {
         guard line.ch == .them else { return }
-        fire(reason: .themPhrase)
+        fire(reason: .themPhrase, forcing: [line])
     }
 
     /// ⌘↩ — ручной ход без дебаунса (FP:543).

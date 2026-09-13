@@ -87,6 +87,16 @@ public final class AudioCapture: NSObject, AVCaptureAudioDataOutputSampleBufferD
         return Double(_deliveredFrames) / Self.sampleRate / elapsed
     }
 
+    /// Режим микрофона macOS для приложения («Стандартный» / «Изоляция голоса» / …).
+    /// «Изоляция» глушит паузы и соседние голоса — до 65 % окна нулями — и живая
+    /// пометка «Я / не я» на таком тракте не работает (poc/livespk/RESULT.md).
+    /// Вызывается с главного потока (завершение `start` приходит туда).
+    nonisolated public static func currentMicrophoneMode() -> String? {
+        MainActor.assumeIsolated {
+            AVCaptureDevice.activeMicrophoneMode.apiName
+        }
+    }
+
     /// Разрешение на микрофон. Спрашивается один раз, дальше отвечает система.
     public static func requestPermission(_ done: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -376,5 +386,17 @@ public enum RebuildPolicy {
         let effective = (sinceLastRebuild ?? .infinity) > burstWindow ? 0 : rebuildsInBurst
         if effective >= maxRebuildsInBurst { return .tooManyRebuilds }
         return .rebuild
+    }
+}
+
+extension AVCaptureDevice.MicrophoneMode {
+    /// Имя для журнала и снимка; nil — незнакомый режим свежей macOS.
+    var apiName: String? {
+        switch self {
+        case .standard: return "standard"
+        case .voiceIsolation: return "voiceIsolation"
+        case .wideSpectrum: return "wideSpectrum"
+        @unknown default: return nil
+        }
     }
 }

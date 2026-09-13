@@ -39,9 +39,9 @@ public final class LiveTranscript {
     }
 
     /// `label` — переопределить метку строки (этап 5: офлайн кладёт реплики одного микрофона
-    /// в два канала по пометке голоса; неопознанные короткие — «?»). `voiceScore` — косинус
-    /// к эталону «я» из события `phrase`, в журнал и только для разбора ошибок пометки.
-    public func apply(_ ch: CallChannel, _ event: ChannelEvent, label: String?, voiceScore: Double? = nil) {
+    /// в два канала по пометке голоса; неопознанные короткие — «?»). `voice` — пометка из
+    /// события `phrase`, в журнал и только для разбора ошибок пометки.
+    public func apply(_ ch: CallChannel, _ event: ChannelEvent, label: String?, voice: VoiceMark? = nil) {
         var gen = generations[ch] ?? Generation()
         switch event {
         case .commit(_, let text):
@@ -59,7 +59,7 @@ public final class LiveTranscript {
                                           t0: gen.offset + phrase.t0, t1: gen.offset + phrase.t1, text: phrase.text)
                 insert(line)
                 write(Self.encodeLine(ch: ch, label: lineLabel, t0: line.t0, t1: line.t1,
-                                      text: line.text, voice: voiceScore))
+                                      text: line.text, voice: voice))
             }
         case .error:
             return
@@ -70,14 +70,20 @@ public final class LiveTranscript {
         onChange?()
     }
 
-    /// Строка §3.3 без "\n"; `voice` — только у офлайн-реплик с пометкой голоса.
+    /// Строка §3.3 без "\n"; `voice` — только у офлайн-реплик с пометкой голоса,
+    /// объектом внутри строки (0.13.2 дописывал ключ за скобкой — журнал не разбирался).
     public static func encodeLine(ch: CallChannel, label: String, t0: Double, t1: Double, text: String,
-                                  voice: Double? = nil) -> String {
+                                  voice: VoiceMark? = nil) -> String {
         var line = "{\"ch\":\(JSONText.quoted(ch.rawValue)),\"label\":\(JSONText.quoted(label)),"
-            + "\"t0\":\(JSONText.number(t0)),\"t1\":\(JSONText.number(t1)),\"text\":\(JSONText.quoted(text))}"
+            + "\"t0\":\(JSONText.number(t0)),\"t1\":\(JSONText.number(t1)),\"text\":\(JSONText.quoted(text))"
         if let voice {
-            line += ",\"voice\":\(JSONText.number(voice))"
+            line += ",\"voice\":{\"self\":\(voice.isSelf),\"score\":\(JSONText.number(voice.score))"
+            if let speech = voice.speechSec {
+                line += ",\"speech\":\(JSONText.number(speech))"
+            }
+            line += "}"
         }
+        line += "}"
         return line
     }
 

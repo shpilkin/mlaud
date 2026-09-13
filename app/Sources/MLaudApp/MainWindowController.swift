@@ -82,7 +82,7 @@ enum MainMenu {
 
         let file = NSMenu(title: "Файл")
         // Этап 4 (§4.6): новый бриф ⌘N — только в разделе «Суфлёр» (валидация по секции).
-        let newBrief = NSMenuItem(title: "Новый бриф…", action: Selector(("newBriefMenu")), keyEquivalent: "n")
+        let newBrief = NSMenuItem(title: "Новый бриф…", action: #selector(AppDelegate.newBriefMenu), keyEquivalent: "n")
         newBrief.target = delegate
         file.addItem(newBrief)
         file.addItem(withTitle: "Закрыть", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -109,7 +109,7 @@ enum MainMenu {
         }
         main.addItem(submenu(view))
         // Этап 4 (§4.6): компактная панель ⌘⇧C.
-        main.addItem(NSMenuItem(title: "Компактный режим", action: Selector(("toggleCompactPanel")), keyEquivalent: "C"))
+        main.addItem(NSMenuItem(title: "Компактный режим", action: #selector(AppDelegate.toggleCompactPanel), keyEquivalent: "C"))
 
         let actions = NSMenu(title: "Действия")
         // ⌘R контекстный (D5): заголовок и действие подставляет `AppDelegate.validateMenuItem`.

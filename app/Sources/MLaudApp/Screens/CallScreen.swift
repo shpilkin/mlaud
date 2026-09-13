@@ -126,7 +126,19 @@ struct CallScreen: View {
             NitiBanner("Живая пометка «Я / не я» выключена: в базе голосов нет персоны «я» — все реплики будут «Я». Эталон: 45 с обычным разговорным голосом, с обычного места — как будете говорить в звонке.",
                        tone: .warn, systemImage: "person.crop.circle.badge.exclamationmark")
         }
+        if let mode = call.micMode {
+            NitiBanner("Режим микрофона «\(Self.micModeName(mode))» душит паузы и соседние голоса — живая пометка работать не будет. Пункт управления → Режим микрофона → «Стандартный».",
+                       tone: .warn, systemImage: "mic.badge.xmark")
+        }
         prompterBanners
+    }
+
+    private static func micModeName(_ api: String) -> String {
+        switch api {
+        case "voiceIsolation": return "Изоляция голоса"
+        case "wideSpectrum": return "Широкий спектр"
+        default: return api
+        }
     }
 
     /// FR-12.16: деградация суфлёра — транскрипт и запись продолжаются (тексты — §1.6 брифа).

@@ -606,6 +606,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.finishSelfVoice(failed: error.localizedDescription)
                 return
             }
+            if let mode = AudioCapture.currentMicrophoneMode(), mode != "standard" {
+                self.notify(title: "MLaud — голос",
+                            body: "Режим микрофона не «Стандартный» (\(mode)) — эталон получится искажённым. Пункт управления → Режим микрофона.")
+            }
             let started = Date()
             let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
                 guard let self else { return }

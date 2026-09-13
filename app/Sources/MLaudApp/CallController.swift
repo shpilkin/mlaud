@@ -285,6 +285,16 @@ final class CallController {
         session.apply(.headphones(OutputDevice.likelySpeakers()))
     }
 
+    /// Режим микрофона в журнал и снимок: «Изоляция голоса» режет тракт нулями —
+    /// пользователь должен видеть причину молчащей пометки (poc/livespk).
+    private func publishMicMode() {
+        let mode = AudioCapture.currentMicrophoneMode()
+        DictationLog.write("звонок: режим микрофона: \(mode ?? "неизвестен")")
+        if let mode, mode != "standard" {
+            session.apply(.micMode(mode))
+        }
+    }
+
     // MARK: - Старт
 
     /// ready → running (только если snapshot.canStart).
@@ -456,6 +466,7 @@ final class CallController {
                 self.failMicrophone(error.localizedDescription)
                 return
             }
+            self.publishMicMode()
             self.startWatchdog()
         }
     }
@@ -560,10 +571,11 @@ final class CallController {
                 DictationLog.write("звонок: канал \(ch): \(message)")
             }
             if self.offline, case .phrase(let phrase) = event {
-                // Этап 5: физический канал один; метка строки — по голосу (S4), свои — «Я»,
-                // чужие — «не я», короче 2 с — «?». Ход суфлёра триггерят «не я»-фразы (them).
+                // Этап 5: физический канал один; метка строки — по голосу (замер poc/livespk:
+                // доминирующая дорожка речи в окне), свои — «Я», чужие — «не я», мало речи — «?».
+                // Ход суфлёра триггерят «не я»-фразы (them).
                 let routed = OfflineVoicePolicy.route(phrase)
-                transcript.apply(routed.ch, event, label: routed.label, voiceScore: phrase.voice?.score)
+                transcript.apply(routed.ch, event, label: routed.label, voice: phrase.voice)
             } else {
                 transcript.apply(channel, event)
             }
@@ -591,9 +603,12 @@ final class CallController {
     private func openChannels() {
         guard let transcript else { return }
         if offline {
-            // Один микрофон с живой пометкой голоса; время — от принятого звука (запись моно).
+            // Один микрофон с живой пометкой голоса. Смещение — позиция записи на момент
+            // open: после перезапуска распознавателя счётчик worker'а начинается заново,
+            // и без смещения t0 ленты уезжает от .m4a.
+            let offset = Double(recordedFrames) / Double(Self.sampleRate)
             deps.recognizer.send(.open(ch: CallChannel.me.rawValue, label: "Я", voice: true))
-            transcript.open(CallChannel.me, offset: 0)
+            transcript.open(CallChannel.me, offset: offset)
             opened.insert(CallChannel.me)
             return
         }

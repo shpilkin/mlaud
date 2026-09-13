@@ -38,11 +38,11 @@ func runOfflineTests() {
     }
 
     test("RecognizerEvent.parse: поле voice в phrase") {
-        let line = #"{"ch":"me","t":"phrase","phrase":1,"t0":0,"t1":3,"text":"я","reason":"silence","window_sec":3,"decodes":1,"voice":{"self":true,"score":0.71}}"#
+        let line = #"{"ch":"me","t":"phrase","phrase":1,"t0":0,"t1":3,"text":"я","reason":"silence","window_sec":3,"decodes":1,"voice":{"self":true,"score":0.71,"speech":2.6}}"#
         guard case .channel("me", .phrase(let phrase))? = RecognizerEvent.parse(line: line) else {
             check(false, "phrase не разобрался"); return
         }
-        eq(phrase.voice, VoiceMark(isSelf: true, score: 0.71), "пометка голоса")
+        eq(phrase.voice, VoiceMark(isSelf: true, score: 0.71, speechSec: 2.6), "пометка голоса")
         let unmarked = #"{"ch":"me","t":"phrase","phrase":2,"t0":3,"t1":4,"text":"угу","reason":"silence","window_sec":1,"decodes":1}"#
         guard case .channel("me", .phrase(let short))? = RecognizerEvent.parse(line: unmarked) else {
             check(false, "phrase без voice не разобрался"); return
@@ -58,13 +58,23 @@ func runOfflineTests() {
         transcript.open(.me, offset: 0)
         let phrase = ChannelPhrase(phrase: 1, t0: 0, t1: 3, text: "не моё", reason: "silence",
                                    windowSec: 3, decodes: 1,
-                                   voice: VoiceMark(isSelf: false, score: 0.3))
-        transcript.apply(.them, .phrase(phrase), label: "не я", voiceScore: 0.3)
+                                   voice: VoiceMark(isSelf: false, score: 0.3, speechSec: 2.8))
+        transcript.apply(.them, .phrase(phrase), label: "не я", voice: phrase.voice)
         eq(transcript.lines.last?.ch, .them, "реплика легла в канал собеседника")
         eq(transcript.lines.last?.label, "не я", "метка переопределена")
         let text = try String(contentsOf: file, encoding: .utf8)
-        check(text.contains(#""label":"не я""#), "файл с переопределённой меткой")
-        check(text.contains(#""voice":0.3"#), "оценка голоса дописана в журнал")
+        // журнал обязан быть валидным JSON построчно: 0.13.2 дописывал voice за скобкой
+        for row in text.split(separator: "\n") {
+            let data = Data(row.utf8)
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                check(false, "строка журнала не JSON: \(row)"); continue
+            }
+            eq(obj["ch"] as? String, "them", "канал в JSON")
+            let voice = obj["voice"] as? [String: Any]
+            eq(voice?["self"] as? Bool, false, "voice.self в JSON")
+            eq((voice?["score"] as? NSNumber)?.doubleValue, 0.3, "voice.score в JSON")
+            eq((voice?["speech"] as? NSNumber)?.doubleValue, 2.8, "voice.speech в JSON")
+        }
     }
 
     test("LiveTranscript.relabel: «Я» ↔ «не я», запись переноса в файл, порядок сохраняется") {
@@ -120,6 +130,19 @@ func runOfflineTests() {
         eq(session.snapshot.mode, "offline", "режим пережил prepare из ready")
         session.apply(.captureMode("vks"))
         eq(session.snapshot.mode, "vks", "режим меняется и в ready")
+    }
+
+    test("CallSession: режим микрофона — событие micMode и сброс новым звонком") {
+        let session = CallSession(now: { Date() })
+        check(session.snapshot.micMode == nil, "по умолчанию не задан")
+        session.apply(.prepare(callID: "2026-09-13_20-00-00", title: "Звонок"))
+        session.apply(.micMode("voiceIsolation"))
+        eq(session.snapshot.micMode, "voiceIsolation", "режим доехал до снимка")
+        session.apply(.stop)
+        session.apply(.finalized(URL(fileURLWithPath: "/tmp/x.m4a")))
+        session.apply(.dismiss)
+        session.apply(.prepare(callID: "2026-09-13_21-00-00", title: "Звонок"))
+        check(session.snapshot.micMode == nil, "новый звонок — режим заново")
     }
 
     test("CallRecorder: моно без сайдкара — wav 1 канал, m4a в inbox, сайдкара нет") {

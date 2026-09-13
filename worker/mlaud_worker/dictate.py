@@ -303,19 +303,23 @@ class ChannelRegistry:
         self._make = make_session
         self._voice_loader = voice_loader   # () -> LiveVoice | None; лениво, один раз
         self._voice = ...                   # загрузка при первом open с voice (этап 5)
+        self._voice_index_mtime = None      # mtime index.json на момент загрузки образцов
         self._sessions: dict[str, DictationSession] = {}
+
+    def _voice_stale(self) -> bool:
+        """База голосов переписана (запись/удаление эталона) — маркер устарел."""
+        mtime = _index_mtime()
+        return self._voice_index_mtime is not None and mtime != self._voice_index_mtime
 
     def _voice_for(self, ch, want: bool):
         """Маркер канала: без флага — None; с флагом — живой маркер или ошибка.
-        Успешно загруженный маркер кешируется; «эталона нет» НЕ кешируется — запись
-        эталона между звонками подхватывается следующим open без перезапуска."""
+        Кеш живёт до смены базы: «эталона нет» и переписанная база (запись/удаление
+        эталона между звонками) подхватываются следующим open без перезапуска."""
         if not want:
             return None, []
-        if self._voice is ...:
+        if self._voice is ... or self._voice is None or self._voice_stale():
             self._voice = self._voice_loader() if self._voice_loader else None
-        elif self._voice is None:
-            retry = self._voice_loader() if self._voice_loader else None
-            self._voice = retry
+            self._voice_index_mtime = _index_mtime()
         if self._voice is None:
             return None, [self._error(ch, "нет персоны «я» в базе голосов — живые пометки выключены (запишите голос в «Голосах» перед звонком)")]
         return self._voice, []
@@ -413,14 +417,24 @@ def _make_session(decode: Callable[[np.ndarray], str], ch: Optional[str],
                             voice=voice)
 
 
-def _voice_loader():
-    """Живой маркер из базы голосов (этап 5); каталог — как у воркера."""
+def _voices_root():
     from pathlib import Path
 
+    return Path(os.environ.get("MLAUD_VOICES_DIR") or Path.home() / "ASR/voices")
+
+
+def _index_mtime():
+    try:
+        return os.stat(_voices_root() / "index.json").st_mtime
+    except OSError:
+        return None
+
+
+def _voice_loader():
+    """Живой маркер из базы голосов (этап 5); каталог — как у воркера."""
     from . import livevoice
 
-    root = Path(os.environ.get("MLAUD_VOICES_DIR") or Path.home() / "ASR/voices")
-    return livevoice.load(root)
+    return livevoice.load(_voices_root())
 
 
 def serve(stdin=None, stdout=None, decode: Optional[Callable] = None,

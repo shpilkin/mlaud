@@ -131,13 +131,17 @@ public enum JSONText {
     }
 }
 
-/// Пометка голоса в событии фразы (этап 5, S4: порог 0.60, фразы ≥ 2 с).
+/// Пометка голоса в событии фразы (этап 5): метка — по доминирующей дорожке речи
+/// в окне (замер poc/livespk: порог 0.40, минимум 1.5 с речи).
 public struct VoiceMark: Equatable, Sendable {
     public let isSelf: Bool
     public let score: Double
-    public init(isSelf: Bool, score: Double) {
+    /// Секунды речи в доминирующей дорожке — для разбора ошибок пометки.
+    public let speechSec: Double?
+    public init(isSelf: Bool, score: Double, speechSec: Double? = nil) {
         self.isSelf = isSelf
         self.score = score
+        self.speechSec = speechSec
     }
 }
 
@@ -223,7 +227,8 @@ public enum RecognizerEvent: Equatable {
         case "phrase":
             let voice = (obj["voice"] as? [String: Any]).flatMap { raw in
                 VoiceMark(isSelf: raw["self"] as? Bool ?? false,
-                          score: (raw["score"] as? NSNumber)?.doubleValue ?? 0)
+                          score: (raw["score"] as? NSNumber)?.doubleValue ?? 0,
+                          speechSec: (raw["speech"] as? NSNumber)?.doubleValue)
             }
             return .channel(ch: ch, .phrase(ChannelPhrase(
                 phrase: phrase,

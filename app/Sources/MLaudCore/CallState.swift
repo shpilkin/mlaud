@@ -104,6 +104,9 @@ public struct CallSnapshot: Equatable, Sendable {
     public var inputDeviceName: String? = nil
     public var outputDeviceName: String? = nil
     public var headphonesWarning = false          // FR-12.1
+    /// Режим микрофона macOS (standard/voiceIsolation/…): гейт «Изоляции голоса»
+    /// превращает до 65 % окна в нули и убивает живую пометку (poc/livespk).
+    public var micMode: String? = nil
     public var microphone: CheckItem = .unknown
     public var appAudio: CheckItem = .unknown
     public var recognizer: RecognizerStatus = .off
@@ -136,8 +139,9 @@ public struct CallAppCandidate: Identifiable, Equatable, Hashable, Sendable {
 }
 
 
-/// Этап 5: куда положить фразу одного микрофона по живой пометке голоса (S4).
-/// Свои → канал «Я»; чужие → канал «не я» (без имён); короче 2 с сигнала нет — «?».
+/// Этап 5: куда положить фразу одного микрофона по живой пометке голоса
+/// (замер poc/livespk). Свои → канал «Я»; чужие → канал «не я» (без имён);
+/// речи в доминирующей дорожке меньше 1.5 с — пометки нет, «?».
 public enum OfflineVoicePolicy {
     public static func route(_ phrase: ChannelPhrase) -> (ch: CallChannel, label: String) {
         guard let voice = phrase.voice else { return (.me, "?") }

@@ -342,3 +342,25 @@ def test_unknown_shown_card_detail_is_noop():
     orch.on_result(orch.in_flight, _result())
     orch.handle({"t": "detail", "card_id": "нет-такой"})
     assert [r.tag for r in submitted] == ["turn"]    # запроса не было
+
+
+def test_lost_turn_streak_is_capped():
+    """Модель всегда отдаёт не-JSON: три потерянных хода подряд — фатальная ошибка,
+    дальше запросов нет, сколько бы реплик ни приходило (цикл «ход-повтор-потеря»
+    жёг запросы без предела)."""
+    orch, events, submitted, _ = _orch()
+    bad = ProviderResult(text="{oops", usage=_usage_cost(0), ttft_ms=None,
+                         latency_ms=100, format_used=None)
+    for round_ in range(3):
+        orch.handle(_turn(msg_t="manual",
+                          lines=[{"ch": "them", "label": "И", "t0": round_, "t1": round_ + 1,
+                                  "text": f"вопрос {round_}"}]))
+        orch.on_result(submitted[-1], bad)          # повтор тем же сообщением
+        orch.on_result(submitted[-1], bad)          # потеря хода
+    fatal = [e for e in events if e.get("fatal")]
+    assert fatal and "три хода подряд" in fatal[-1]["message"]
+    assert len(submitted) == 6                      # 3 хода × (ход + один повтор)
+    n = len(submitted)
+    orch.handle(_turn(msg_t="manual",
+                      lines=[{"ch": "them", "label": "И", "t0": 9, "t1": 10, "text": "ещё"}]))
+    assert len(submitted) == n, "после фатала запросов нет"

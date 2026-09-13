@@ -9,6 +9,7 @@ public final class CallSession {
         case devices(input: String?, output: String?, app: String?)
         case checklist(microphone: CheckItem, appAudio: CheckItem)
         case headphones(Bool)
+        case micMode(String)                     // не «standard» — гейт душит паузы и соседние голоса
         case start                              // ready → running; startedAt = now
         case tick                               // elapsed = now − startedAt
         case recognizer(RecognizerStatus)
@@ -72,6 +73,8 @@ public final class CallSession {
             s.appAudio = appAudio
         case .headphones(let warning):
             s.headphonesWarning = warning
+        case .micMode(let mode):
+            s.micMode = mode
         case .start:
             guard s.canStart else { return }
             s.phase = .running

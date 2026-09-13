@@ -15,6 +15,7 @@ from .types import Connection, Limits, ProviderError, ProviderResult, TurnReques
 
 REASON_PRIORITY = {"timer": 0, "them_phrase": 1, "manual": 2}
 MAX_ATTEMPTS = 3
+MAX_LOST_TURNS = 3
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class Orchestrator:
         self.has_criteria = has_criteria
         # Состояние (для тестов).
         self.in_flight: Optional[Request] = None
+        self._lost_streak = 0              # проигранные ходы подряд; 3 — модель не отвечает форматом
         self.pending_lines: list = []
         self.pending_reason: Optional[str] = None
         self.pending_agenda: list = []
@@ -146,6 +148,8 @@ class Orchestrator:
     def _maybe_fire(self) -> None:
         if self.disabled or self.paused_user or self.paused_cost or self.finishing:
             return
+        if self._lost_streak >= MAX_LOST_TURNS:
+            return
         if self.in_flight is not None:
             return
         if not self.pending_reason:
@@ -220,7 +224,9 @@ class Orchestrator:
         self.submit(self.in_flight)
 
     def _lose_turn(self, message: str) -> None:
-        """Ход потерян: user уходит из истории, реплики возвращаются в копилку (§4.3)."""
+        """Ход потерян: user уходит из истории, реплики возвращаются в копилку (§4.3).
+        Три подряд потерянных — модель детерминированно битая (не-JSON и т.п.):
+        фатальная ошибка, иначе цикл «ход-повтор-потеря» жжёт запросы без предела."""
         if self.history and self.history[-1]["role"] == "user":
             self.history.pop()
         if self._last_state is not None:
@@ -228,6 +234,15 @@ class Orchestrator:
             if self.pending_reason is None:
                 self.pending_reason = "them_phrase"
         self.attempt = 0
+        self._lost_streak += 1
+        if self._lost_streak >= MAX_LOST_TURNS:
+            self.pending_lines = []
+            self.pending_reason = None
+            self.emit({"t": "error", "message": f"три хода подряд потеряны ({message}) — "
+                                                "модель не отвечает форматом, суфлёр выключен",
+                       "fatal": True})
+            self._log(tag="turn", turn=self.turn_no, error=f"lost streak {self._lost_streak}")
+            return
         event = {"t": "error", "message": message}
         if self.turn_no:
             event["turn"] = self.turn_no
@@ -287,6 +302,7 @@ class Orchestrator:
         for i, card in enumerate(cards):
             card["id"] = f"{req.turn}.{i + 1}"
         self.shown_cards = cards
+        self._lost_streak = 0
         self.emit({"t": "cards", "turn": req.turn, "cards": cards, "agenda": payload["agenda"],
                    "flags": payload["flags"], "usage": result.usage.to_json(),
                    "first_card_ms": self._first_card_ms, "latency_ms": result.latency_ms,
