@@ -123,7 +123,7 @@ struct CallScreen: View {
             NitiBanner(CallConsent.line, tone: .info, systemImage: "record.circle")
         }
         if call.mode == "offline", !model.selfVoiceReady {
-            NitiBanner("Живая пометка «Я / не я» выключена: в базе голосов нет персоны «я» — все реплики будут «Я». Эталон записывается до звонка (30 с).",
+            NitiBanner("Живая пометка «Я / не я» выключена: в базе голосов нет персоны «я» — все реплики будут «Я». Эталон записывается до звонка: 45 с без длинных пауз.",
                        tone: .warn, systemImage: "person.crop.circle.badge.exclamationmark")
         }
         prompterBanners
@@ -180,15 +180,15 @@ struct CallScreen: View {
                         .foregroundStyle(Niti.Colors.text)
                     Text(model.selfVoiceReady
                          ? "эталон в базе: реплики будут помечаться «Я / не я»"
-                         : "без эталона все реплики останутся «Я»: 30 с речи — и база готова")
+                         : "без эталона все реплики останутся «Я»: 45 с без пауз — и база готова")
                         .font(Niti.Typography.sm)
                         .foregroundStyle(Niti.Colors.muted)
                 }
                 Spacer(minLength: Niti.Spacing.s2)
                 if let sec = model.selfVoiceRecording {
-                    ProgressView(value: sec, total: 30)
+                    ProgressView(value: sec, total: 45)
                         .frame(width: 90)
-                    Text("\(Int(30 - sec)) с")
+                    Text("\(Int(45 - sec)) с")
                         .font(Niti.Typography.sm)
                         .foregroundStyle(Niti.Colors.muted)
                         .monospacedDigit()
@@ -197,7 +197,7 @@ struct CallScreen: View {
                 } else if model.selfVoiceReady {
                     NitiStatusPill("готово", tone: .success, systemImage: "checkmark")
                 } else {
-                    Button("Записать 30 с") { model.commands?.recordSelfVoice() }
+                    Button("Записать 45 с") { model.commands?.recordSelfVoice() }
                         .buttonStyle(.niti(.primary, size: .small))
                 }
             }

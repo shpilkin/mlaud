@@ -50,7 +50,10 @@ class LiveVoice:
 
 def self_centroid(gallery: dict) -> Optional[np.ndarray]:
     """Центроид персоны «я» без учёта регистра: в базе бывает «я» с маленькой
-    (заведена вручную до этапа 5); новые записи всегда канонические «Я»."""
+    (заведена вручную до этапа 5); новые записи всегда канонические «Я».
+    Есть обе — выигрывает точное «Я» (свежий эталон), а не первая по порядку."""
+    if SELF_NAME in gallery:
+        return gallery[SELF_NAME]
     for name, vec in gallery.items():
         if name.lower() == SELF_NAME.lower():
             return vec

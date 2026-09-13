@@ -93,6 +93,19 @@ def test_self_lookup_is_case_insensitive(tmp_path, monkeypatch):
     assert livevoice.load(tmp_path) is not None
 
 
+def test_self_centroid_prefers_exact_over_lowercase():
+    """Есть обе персоны — «Я» (свежий эталон) выигрывает у «я» независимо от порядка."""
+    upper = np.zeros(8, dtype=np.float32)
+    upper[0] = 1.0
+    lower = np.zeros(8, dtype=np.float32)
+    lower[1] = 1.0
+    for gallery in ({"я": lower, "Я": upper}, {"Я": upper, "я": lower}):
+        centroid = livevoice.self_centroid(gallery)
+        assert centroid is upper, "точное «Я» старше регистра-двойника"
+    assert livevoice.self_centroid({"я": lower}) is lower, "одиночная «я» находится"
+    assert livevoice.self_centroid({"Артём А": lower}) is None
+
+
 def test_load_with_self_person_builds_marker(tmp_path, monkeypatch):
     """Маркер из базы: персоны нет — None; есть «Я» — маркер (эмуляция эмбеддера:
     torch живёт в venv распознавателя, в тестовом — подмена)."""

@@ -577,7 +577,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var selfVoiceCapture: AudioCapture?
     private var selfVoiceTimer: Timer?
     private var selfVoicePCM = Data()
-    private static let selfVoiceSeconds: Double = 30
+    /// 45 с записи: энролмент требует ≥ 30 с именно речи — у непрерывного монолога
+    /// с микропаузами на 30 с записи выходит 25–28 с речи и отказ.
+    private static let selfVoiceSeconds: Double = 45
 
     func recordSelfVoice() {
         guard selfVoiceCapture == nil else { return }
@@ -641,7 +643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         enrollSelfVoice(selfVoicePCM)
     }
 
-    /// 30 с речи → wav → `voices enroll-reference` (диаризация на CPU worker'а).
+    /// Запись с микрофона → wav → `voices enroll-reference` (диаризация на CPU worker'а).
     private func enrollSelfVoice(_ pcm: Data) {
         let dir = serviceDirectory.appendingPathComponent("self-voice", isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
