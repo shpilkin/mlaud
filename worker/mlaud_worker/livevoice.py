@@ -27,47 +27,54 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 
 class LiveVoice:
-    """Маркер фраз: держит центроид «Я» из базы голосов и функцию эмбеддинга."""
+    """Маркер фраз: держит образцы «Я» из базы голосов и функцию эмбеддинга."""
 
-    def __init__(self, embed: Callable[[np.ndarray], np.ndarray], centroid: np.ndarray,
+    def __init__(self, embed: Callable[[np.ndarray], np.ndarray], refs: list,
                  threshold: float = THRESHOLD, min_sec: float = MIN_SEC):
         self.embed = embed
-        self.centroid = spkid.normalize(centroid)
+        # Режимы голоса одного человека почти ортогональны (замер 2026-09-13:
+        # «начитка вплотную» и разговорная речь — ~0.2 друг к другу), средний
+        # центроид теряет оба — счёт ведётся по лучшему образцу.
+        self.refs = [u for u in (spkid.normalize(r) for r in refs) if u is not None]
         self.threshold = threshold
         self.min_sec = min_sec
 
     def mark(self, samples: np.ndarray) -> Optional[dict]:
-        """{"self": bool, "score": косинус} для фразы ≥ min_sec; короче — None.
+        """{"self": bool, "score": лучший косинус} для фразы ≥ min_sec; короче — None.
         Голосовые метки живьём в базу не пишутся (5.4) — это только событие."""
-        if self.centroid is None or samples.size < int(self.min_sec * SR):
+        if not self.refs or samples.size < int(self.min_sec * SR):
             return None
         emb = spkid.normalize(self.embed(samples))
         if emb is None:
             return None
-        score = _cosine(emb, self.centroid)
+        score = max(_cosine(emb, ref) for ref in self.refs)
         return {"self": score >= self.threshold, "score": round(score, 2)}
 
 
-def self_centroid(gallery: dict) -> Optional[np.ndarray]:
-    """Центроид персоны «я» без учёта регистра: в базе бывает «я» с маленькой
-    (заведена вручную до этапа 5); новые записи всегда канонические «Я».
-    Есть обе — выигрывает точное «Я» (свежий эталон), а не первая по порядку."""
-    if SELF_NAME in gallery:
-        return gallery[SELF_NAME]
-    for name, vec in gallery.items():
-        if name.lower() == SELF_NAME.lower():
-            return vec
-    return None
+def self_refs(store) -> list:
+    """Все образцы персоны «я»: точное «Я» старше регистра-двойника («я» с маленькой
+    бывала заведена вручную до этапа 5). Персоны нет — пусто."""
+    people = store.people()
+    name = SELF_NAME if SELF_NAME in people else next(
+        (n for n in people if n.lower() == SELF_NAME.lower()), None)
+    if name is None:
+        return []
+    refs = []
+    for sid in people[name].get("samples", []):
+        path = store.samples_dir / f"{sid}.npy"
+        if path.exists():
+            refs.append(np.load(path))
+    return refs
 
 
 def load(voices_dir: Path) -> Optional[LiveVoice]:
-    """Живой маркер из базы голосов: центроид персоны «Я»; персоны нет — None."""
+    """Живой маркер из базы голосов: образцы персоны «Я»; персоны нет — None."""
     from .voices import VoiceStore
 
-    centroid = self_centroid(VoiceStore(voices_dir).gallery())
-    if centroid is None:
+    refs = self_refs(VoiceStore(voices_dir))
+    if not refs:
         return None
-    return LiveVoice(_cpu_embedder(), centroid)
+    return LiveVoice(_cpu_embedder(), refs)
 
 
 def _cpu_embedder() -> Callable[[np.ndarray], np.ndarray]:

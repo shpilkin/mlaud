@@ -29,7 +29,7 @@ def _marker(scores):
         v[1] = (1.0 - cos * cos) ** 0.5
         return v
 
-    return LiveVoice(embed, centroid), calls
+    return LiveVoice(embed, [centroid]), calls
 
 
 def test_self_above_threshold():
@@ -95,15 +95,42 @@ def test_self_lookup_is_case_insensitive(tmp_path, monkeypatch):
 
 def test_self_centroid_prefers_exact_over_lowercase():
     """Есть обе персоны — «Я» (свежий эталон) выигрывает у «я» независимо от порядка."""
+    from mlaud_worker.voices import VoiceStore
+
     upper = np.zeros(8, dtype=np.float32)
     upper[0] = 1.0
     lower = np.zeros(8, dtype=np.float32)
     lower[1] = 1.0
-    for gallery in ({"я": lower, "Я": upper}, {"Я": upper, "я": lower}):
-        centroid = livevoice.self_centroid(gallery)
-        assert centroid is upper, "точное «Я» старше регистра-двойника"
-    assert livevoice.self_centroid({"я": lower}) is lower, "одиночная «я» находится"
-    assert livevoice.self_centroid({"Артём А": lower}) is None
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        for order in ("lower-first", "upper-first"):   # не кириллицей: APFS не чувствует регистр
+            store = VoiceStore(Path(d) / order)
+            by_name = {"я": lower, "Я": upper}
+            names = ("я", "Я") if order == "lower-first" else ("Я", "я")
+            for n in names:
+                store.add(n, by_name[n], source_file="old.m4a", label="S", speech_sec=30.0)
+            refs = livevoice.self_refs(store)
+            assert len(refs) == 1 and np.array_equal(refs[0], upper), \
+                "точное «Я» старше регистра-двойника"
+    with tempfile.TemporaryDirectory() as d:
+        store = VoiceStore(Path(d) / "only")
+        store.add("я", lower, source_file="old.m4a", label="S", speech_sec=30.0)
+        assert len(livevoice.self_refs(store)) == 1, "одиночная «я» находится"
+        store.add("Артём А", lower, source_file="x.m4a", label="S", speech_sec=30.0)
+        assert livevoice.self_refs(VoiceStore(Path(d) / "empty")) == []
+
+
+def test_best_of_refs_wins():
+    """Счёт — лучший косинус по образцам: фраза в «разговорном» режиме не обязана
+    походить на «начитку», достаточно совпасть с одним из образцов."""
+    refs = [np.zeros(8, dtype=np.float32) for _ in range(2)]
+    refs[0][0] = 1.0                                   # «начитка»
+    refs[1][1] = 1.0                                   # «разговор»
+    spoken = np.zeros(8, dtype=np.float32)
+    spoken[1] = 1.0                                    # совпал разговорный
+    marker = LiveVoice(lambda samples: spoken, refs)
+    long_phrase = np.zeros(int(MIN_SEC * SR) + SR, dtype=np.float32)
+    assert marker.mark(long_phrase) == {"self": True, "score": 1.0}
 
 
 def test_load_with_self_person_builds_marker(tmp_path, monkeypatch):
