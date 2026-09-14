@@ -115,6 +115,17 @@ case "list":
         }
     }
     exit(0)
+case "miccompare":
+    let secs = value("--seconds").flatMap { Int($0) } ?? 8
+    let onlyCapture = flag("--only-capture")
+    let onlyEngine = flag("--only-engine")
+    do {
+        try MicCompare().run(seconds: secs, withCapture: !onlyEngine, withEngine: !onlyCapture)
+    } catch {
+        log("ERROR miccompare: \(error)")
+    }
+    log("DONE")
+    exit(0)
 case "tap", "sck":
     break
 default:
