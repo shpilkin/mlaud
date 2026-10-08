@@ -40,6 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var notifications = NotificationHistory(
         url: serviceDirectory.appendingPathComponent("notifications.json"))
     private lazy var phoneSync = PhoneSyncController(serviceDirectory: serviceDirectory)
+    /// MCP-сервер для внешних агентов (openclaw): процесс со своей моделью по требованию.
+    private lazy var agentAccess = AgentAccessController(
+        logURL: serviceDirectory.appendingPathComponent("mcp.log"))
+    private lazy var agentSecrets: SecretStore =
+        previewOnly ? InMemorySecretStore() : KeychainStore(service: "com.mlaud.app.mcp")
     /// Резидентный распознаватель, общий для диктовки и звонка. Замыкание держит значения,
     /// а не AppDelegate: пути за время жизни приложения не меняются, а настройки живут в своём объекте.
     private lazy var recognizer: RecognizerProcess = {
@@ -197,6 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restartWatcher()
         restartDictation()
         restartPhoneSync()
+        restartAgentAccess()
         refreshPendingVoices()
         reloadRecordings()
         recoverCalls()
@@ -227,6 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         call?.suspendForQuit()   // захваты стоп, файлы .incoming остаются — recover доделает
         dictation?.shutdown()
         recognizer.shutdown()    // резидентная модель держит ~1.6 ГБ — отпускаем явно
+        agentAccess.stop()
     }
 
     /// Побочный эффект смены настройки — по ключу, а не «перезапустить всё».
@@ -236,7 +243,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .watcher: restartWatcher()
         case .dictation: restartDictation()
         case .phoneSync: restartPhoneSync()
-        case .voices: refreshPendingVoices()
+        case .voices:
+            refreshPendingVoices()
+            restartAgentAccess()  // диаризация и имена по голосу едут в окружение сервера
+        case .agentAccess: restartAgentAccess()
         case .notifications: if settings.notificationsEnabled { UserNotifier.requestAuthorization() }
         }
         publish()
@@ -267,6 +277,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.phone = phoneSync.state
         model.phoneLastReceived = phoneSync.lastReceived
         model.phoneReceipts = PhoneReceipts.load(serviceDirectory.appendingPathComponent("sync/received.json"))
+
+        model.agentAccess = agentAccess.state
 
         model.dictation = dictation?.state ?? .off
         model.hotKeyFailed = hotKeyFailed
@@ -332,6 +344,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let syncLine = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             syncLine.isEnabled = false
             menu.addItem(syncLine)
+        }
+
+        if settings.agentAccessEnabled {
+            let line = NSMenuItem(title: agentAccess.state.menuTitle, action: nil, keyEquivalent: "")
+            line.isEnabled = false
+            menu.addItem(line)
         }
 
         menu.addItem(.separator())
@@ -754,6 +772,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         phoneSync.start(inbox: folderStore.inboxFolder, serviceDirectory: serviceDirectory)
     }
 
+    // MARK: - Доступ агентов (MCP)
+
+    /// Перезапустить MCP-сервер под текущие настройки: окружение (папка inbox, диаризация,
+    /// имена по голосу) запекается в процесс при запуске.
+    private func restartAgentAccess() {
+        guard !previewOnly else { return }
+        agentAccess.onStateChanged = { [weak self] in self?.publish() }
+        guard settings.agentAccessEnabled else {
+            agentAccess.stop()
+            return
+        }
+        let token: String
+        do {
+            token = try AgentAccess.loadOrCreateToken(in: agentSecrets)
+        } catch {
+            agentAccess.fail("Keychain: \(error.localizedDescription)")
+            return
+        }
+        let python = pythonExecutable
+        let workerDir = workerDirectory
+        let extraPath = additionalPythonPath
+        let inbox = folderStore.inboxFolder ?? serviceDirectory
+        let port = settingsStore.agentAccessPort
+        let store = settingsStore
+        agentAccess.start {
+            let env = store.workerEnvironment()
+                .merging(AgentAccess.environment(port: port, token: token)) { _, new in new }
+            return WorkerCommand(
+                pythonExecutable: python,
+                workerDirectory: workerDir,
+                inboxFolder: inbox,
+                additionalPythonPath: extraPath,
+                extraEnvironment: env,
+                module: AgentAccess.module,
+                moduleArguments: ["--http"]
+            )
+        }
+    }
+
     // MARK: - Диктовка
 
     /// Пересобрать диктовку под текущие настройки. Хоткей регистрируется всегда, когда
@@ -965,6 +1022,7 @@ extension AppDelegate: AppCommands {
             // Приёмник держит папку в своей конфигурации: без перезапуска принятое
             // с телефона уедет в прежний inbox, за которым уже никто не следит.
             restartPhoneSync()
+            restartAgentAccess()
             publish()
             autoProcess()
         }
@@ -1069,6 +1127,43 @@ extension AppDelegate: AppCommands {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         notifications.clear()
         publish()
+    }
+
+    func copyAgentCommand() {
+        do {
+            let token = try AgentAccess.loadOrCreateToken(in: agentSecrets)
+            let command = AgentAccess.openclawCommand(port: settingsStore.agentAccessPort, token: token)
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(command, forType: .string)
+            model.toast = "Команда для openclaw скопирована"
+        } catch {
+            notify(title: "MLaud — агенты", body: "Keychain: \(error.localizedDescription)")
+        }
+    }
+
+    func regenerateAgentToken() {
+        let alert = NSAlert()
+        alert.messageText = "Сменить токен доступа агентов?"
+        alert.informativeText = "Подключённые агенты перестанут получать ответы, пока их не добавят заново новой командой."
+        alert.addButton(withTitle: "Сменить")
+        alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try AgentAccess.regenerateToken(in: agentSecrets)
+            restartAgentAccess()
+            model.toast = "Токен сменён — скопируй команду заново"
+        } catch {
+            notify(title: "MLaud — агенты", body: "Keychain: \(error.localizedDescription)")
+        }
+    }
+
+    func openAgentLog() {
+        let url = serviceDirectory.appendingPathComponent("mcp.log")
+        if !fm.fileExists(atPath: url.path) {
+            try? fm.createDirectory(at: serviceDirectory, withIntermediateDirectories: true)
+            fm.createFile(atPath: url.path, contents: nil)
+        }
+        NSWorkspace.shared.open(url)
     }
 
     func pairing() -> PairingInfo? {

@@ -28,6 +28,9 @@ protocol AppCommands: AnyObject {
     func regeneratePairing()
     // Настройки
     func testTelegram()
+    func copyAgentCommand()
+    func regenerateAgentToken()
+    func openAgentLog()
     func showStyleguide()
     // Суфлёр
     func startCallSetup()

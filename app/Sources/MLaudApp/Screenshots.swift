@@ -109,6 +109,11 @@ enum Screenshots {
                         $0.settings.connectionHasKey = [LLMConnection.presets[0].id: true]
                         $0.settings.connectionCheck = [LLMConnection.presets[1].id: .ok(ttftMs: 2600)]
                     })
+                    jobs.append(Job(file: "8c-settings-agents-\(suffix)", appearance: name) {
+                        $0.section = .settings
+                        $0.settingsTab = .agents
+                        $0.agentAccess = .listening(port: AgentAccess.defaultPort)
+                    })
                 }
             }
         }

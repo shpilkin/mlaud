@@ -29,6 +29,14 @@ if let i = CommandLine.arguments.firstIndex(of: "--smoke-voices"),
                          workerDir: a[i + 3], voicesDir: a[i + 4], archive: archive))
 }
 
+// Дымовая проверка MCP-сервера: MLaudApp --smoke-agents <python> <каталог worker> <порт> [hold]
+if let i = CommandLine.arguments.firstIndex(of: "--smoke-agents"),
+   CommandLine.arguments.count > i + 3, let port = Int(CommandLine.arguments[i + 3]) {
+    let a = CommandLine.arguments
+    exit(AgentAccessSmoke.run(python: a[i + 1], workerDir: a[i + 2], port: port,
+                              hold: a.count > i + 4 && a[i + 4] == "hold"))
+}
+
 // Снимки экранов главного окна для проверки вида: MLaudApp --screenshot <каталог>.
 let screenshotDirectory: URL? = {
     guard let i = CommandLine.arguments.firstIndex(of: "--screenshot"),

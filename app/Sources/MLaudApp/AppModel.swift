@@ -72,6 +72,9 @@ final class AppModel {
     var phoneLastReceived: PhoneSyncController.Received?
     var phoneReceipts: [PhoneReceipt] = []
 
+    // Доступ агентов по MCP
+    var agentAccess: AgentAccess.State = .disabled
+
     // Диктовка
     var dictation: DictationController.State = .off
     var hotKeyFailed = false

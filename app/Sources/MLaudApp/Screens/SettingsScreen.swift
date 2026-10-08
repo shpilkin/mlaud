@@ -5,7 +5,7 @@ import SwiftUI
 /// Настройки во вкладках; применение — сразу при изменении, предупреждения — баннером.
 struct SettingsScreen: View {
     enum Tab: Hashable {
-        case general, transcription, delivery, dictation, phone, prompter
+        case general, transcription, delivery, dictation, phone, prompter, agents
     }
 
     @Bindable var model: AppModel
@@ -20,6 +20,7 @@ struct SettingsScreen: View {
                 .init(.dictation, "Диктовка", systemImage: "mic"),
                 .init(.phone, "iPhone", systemImage: "iphone"),
                 .init(.prompter, "Суфлёр", systemImage: "text.bubble"),
+                .init(.agents, "Агенты", systemImage: "point.3.connected.trianglepath.dotted"),
             ], selection: Binding(
             get: { model.settingsTab },
             set: { model.settingsTab = $0 }))
@@ -30,6 +31,7 @@ struct SettingsScreen: View {
             case .dictation: dictation
             case .phone: phone
             case .prompter: prompter
+            case .agents: agents
             }
         }
         .onAppear { settings.refreshLoginItem() }
@@ -218,6 +220,39 @@ struct SettingsScreen: View {
                 .buttonStyle(.niti(.plain, size: .small))
         }
         SettingsPrompterSection(model: model)
+    }
+
+    /// Доступ внешних агентов по MCP (docs/mcp.md).
+    @ViewBuilder
+    private var agents: some View {
+        @Bindable var settings = model.settings
+        NitiFormRow("", hint: "openclaw и другие агенты на этом Mac: распознать голосовое, "
+                    + "прочитать транскрипт. В Niti распознанное агентом не попадает") {
+            Toggle("Доступ для агентов по MCP", isOn: $settings.agentAccessEnabled)
+                .toggleStyle(.checkbox)
+        }
+        NitiFormRow("Состояние") {
+            HStack(spacing: Niti.Spacing.s2) {
+                switch model.agentAccess {
+                case .disabled: NitiStatusPill("выключен", tone: .neutral)
+                case .starting: NitiStatusPill("запускаюсь…", tone: .accent)
+                case .listening: NitiStatusPill(model.agentAccess.title, tone: .success, systemImage: "checkmark")
+                case .failed(let reason): NitiStatusPill(reason, tone: .danger, systemImage: "xmark")
+                }
+                Button("Журнал") { model.commands?.openAgentLog() }
+                    .buttonStyle(.niti(.plain, size: .small))
+            }
+        }
+        NitiFormRow("Подключение", hint: "команда с адресом и токеном — вставь её в терминал; "
+                    + "модель грузится при первом вызове и выгружается после 10 минут простоя") {
+            HStack(spacing: Niti.Spacing.s2) {
+                Button("Скопировать команду для openclaw") { model.commands?.copyAgentCommand() }
+                    .buttonStyle(.niti)
+                Button("Сменить токен") { model.commands?.regenerateAgentToken() }
+                    .buttonStyle(.niti(.plain, size: .small))
+            }
+        }
+        .disabled(!settings.agentAccessEnabled)
     }
 
     @ViewBuilder

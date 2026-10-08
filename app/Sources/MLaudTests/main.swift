@@ -1639,6 +1639,78 @@ test("RecordingIndex: имена говорящих звонка — из channe
     eq(withoutArchive.first { $0.base == "2026-09-04_15-30-05" }!.speakers, [], "без archiveRoot channels.json не читается")
 }
 
+// MARK: AgentAccess (MCP для внешних агентов)
+
+test("AgentAccess: события процесса сервера") {
+    eq(AgentAccess.Event.parse(line: #"{"t": "ready", "port": 8767}"#), .ready(port: 8767), "ready")
+    eq(AgentAccess.Event.parse(line: #"{"t":"error","message":"порт 8767 занят"}"#),
+       .error("порт 8767 занят"), "error")
+    eq(AgentAccess.Event.parse(line: #"{"t":"ready","port":0}"#), nil, "порт 0 — не готов")
+    eq(AgentAccess.Event.parse(line: #"{"t":"ready"}"#), nil, "без порта")
+    eq(AgentAccess.Event.parse(line: "[mlaud-mcp] слушаю"), nil, "не JSON")
+    eq(AgentAccess.Event.parse(line: #"{"t":"other"}"#), nil, "чужое событие")
+}
+
+test("AgentAccess: токен") {
+    let a = AgentAccess.newToken(), b = AgentAccess.newToken()
+    eq(a.count, 43, "32 байта в base64url без =")
+    check(a != b, "токены случайны")
+    check(AgentAccess.isValidToken(a), "свой токен валиден")
+    check(!AgentAccess.isValidToken("short"), "короткий — нет")
+    check(!AgentAccess.isValidToken(String(repeating: "a", count: 40) + "'x"), "кавычка ломала бы команду")
+}
+
+test("AgentAccess: токен создаётся один раз и меняется по запросу") {
+    let store: SecretStore = InMemorySecretStore()
+    let first = try AgentAccess.loadOrCreateToken(in: store)
+    eq(try AgentAccess.loadOrCreateToken(in: store), first, "второй вызов — тот же токен")
+    try store.setSecret("испорчен", for: AgentAccess.tokenAccount)
+    let fixed = try AgentAccess.loadOrCreateToken(in: store)
+    check(fixed != "испорчен" && AgentAccess.isValidToken(fixed), "испорченный заменён")
+    let next = try AgentAccess.regenerateToken(in: store)
+    check(next != fixed, "смена токена")
+    eq(store.secret(for: AgentAccess.tokenAccount), next, "новый сохранён")
+}
+
+test("AgentAccess: команда openclaw и окружение") {
+    let cmd = AgentAccess.openclawCommand(port: 8767, token: "TOKEN")
+    eq(cmd, "openclaw mcp add mlaud --transport streamable-http --url http://127.0.0.1:8767/mcp"
+        + " --header 'Authorization=Bearer TOKEN' --timeout 900", "команда")
+    let env = AgentAccess.environment(port: 9000, token: "T")
+    eq(env["MLAUD_MCP_PORT"], "9000", "порт")
+    eq(env["MLAUD_MCP_TOKEN"], "T", "токен")
+    eq(env["MLAUD_MCP_IDLE_SEC"], "600", "простой 10 минут")
+}
+
+test("AgentAccess: решение после выхода процесса") {
+    eq(AgentAccess.afterExit(code: 2, lastError: "порт 8767 занят", failuresInLastMinute: 1),
+       .fail("порт 8767 занят"), "ошибка конфигурации — без повторов")
+    eq(AgentAccess.afterExit(code: 1, lastError: nil, failuresInLastMinute: 1),
+       .restart(afterSeconds: 2), "упал — перезапуск")
+    eq(AgentAccess.afterExit(code: -9, lastError: nil, failuresInLastMinute: 2),
+       .restart(afterSeconds: 2), "второй раз — ещё перезапуск")
+    if case .fail = AgentAccess.afterExit(code: 1, lastError: nil, failuresInLastMinute: 3) {} else {
+        check(false, "третье падение за минуту — стоп")
+    }
+}
+
+test("AgentAccess: состояние в меню") {
+    eq(AgentAccess.State.listening(port: 8767).menuTitle, "Агенты (MCP): слушаю 127.0.0.1:8767", "меню")
+}
+
+test("SettingsStore: доступ агентов выключен по умолчанию, порт 8767") {
+    let s = SettingsStore(defaults: makeDefaults())
+    check(!s.agentAccessEnabled, "выключен")
+    eq(s.agentAccessPort, 8767, "порт по умолчанию")
+    s.agentAccessPort = 80
+    eq(s.agentAccessPort, 8767, "привилегированный порт — к дефолту")
+    s.agentAccessPort = 9100
+    eq(s.agentAccessPort, 9100, "свой порт")
+    s.agentAccessEnabled = true
+    check(s.agentAccessEnabled, "включён")
+    eq(s.workerEnvironment()["MLAUD_MCP_TOKEN"], nil, "токен не попадает в окружение пакетного worker'а")
+}
+
 removeTestDefaults()
 runCallRecorderTests()
 runOfflineTests()

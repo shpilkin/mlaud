@@ -9,7 +9,7 @@ import Observation
 final class SettingsModel {
     /// Что нужно пересобрать после изменения ключа.
     enum Change {
-        case watcher, dictation, phoneSync, voices, notifications
+        case watcher, dictation, phoneSync, voices, notifications, agentAccess
     }
 
     enum TelegramTest: Equatable {
@@ -40,6 +40,10 @@ final class SettingsModel {
         }
     }
     var phoneSyncEnabled: Bool { didSet { store.phoneSyncEnabled = phoneSyncEnabled; onChange(.phoneSync) } }
+    var agentAccessEnabled: Bool {
+        didSet { store.agentAccessEnabled = agentAccessEnabled; onChange(.agentAccess) }
+    }
+    var agentAccessPort: Int { store.agentAccessPort }
     var identifyEnabled: Bool { didSet { store.identifyEnabled = identifyEnabled; onChange(.voices) } }
     var identifyPreset: SettingsStore.IdentifyPreset { didSet { store.identifyPreset = identifyPreset } }
     var callAppBundleID: String? { didSet { store.callAppBundleID = callAppBundleID } }
@@ -79,6 +83,7 @@ final class SettingsModel {
         dictationEnabled = store.dictationEnabled
         dictationHotKey = store.dictationHotKey
         phoneSyncEnabled = store.phoneSyncEnabled
+        agentAccessEnabled = store.agentAccessEnabled
         identifyEnabled = store.identifyEnabled
         identifyPreset = store.identifyPreset
         callAppBundleID = store.callAppBundleID

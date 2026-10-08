@@ -26,6 +26,8 @@ public final class SettingsStore {
         public static let compactPanelAtStart = "compactPanelAtStart"
         public static let llmConnections = "llmConnections"
         public static let llmDefault = "llmDefaultConnection"
+        public static let agentAccess = "agentAccessEnabled"
+        public static let agentPort = "agentAccessPort"
     }
 
     /// Порог узнавания голоса: три пресета из замера (ADR-016), а не сырое число.
@@ -199,6 +201,21 @@ public final class SettingsStore {
     public var compactPanelAtStart: Bool {
         get { defaults.bool(forKey: Key.compactPanelAtStart) }
         set { defaults.set(newValue, forKey: Key.compactPanelAtStart) }
+    }
+
+    /// Доступ внешних агентов по MCP (docs/mcp.md). По умолчанию выключен.
+    public var agentAccessEnabled: Bool {
+        get { defaults.bool(forKey: Key.agentAccess) }
+        set { defaults.set(newValue, forKey: Key.agentAccess) }
+    }
+
+    /// Порт MCP на 127.0.0.1; вне 1024…65535 — порт по умолчанию.
+    public var agentAccessPort: Int {
+        get {
+            let v = defaults.integer(forKey: Key.agentPort)
+            return (1024...65535).contains(v) ? v : AgentAccess.defaultPort
+        }
+        set { defaults.set(newValue, forKey: Key.agentPort) }
     }
 
     /// Переменные окружения для worker'а. Telegram-ключи добавляются только если заданы —
