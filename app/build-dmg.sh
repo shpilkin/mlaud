@@ -11,7 +11,7 @@ REPO=".."
 APP_NAME="MLaud"
 EXE_NAME="MLaudApp"
 BUNDLE_ID="com.mlaud.app"
-VERSION="0.14.0"
+VERSION="0.14.1"
 
 VENV="$REPO/poc/.venv"
 SITE="$VENV/lib/python3.12/site-packages"

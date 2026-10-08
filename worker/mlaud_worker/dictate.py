@@ -391,6 +391,9 @@ def _build_decoder(model_type: str = "rnnt") -> Callable[[np.ndarray], str]:
     from gigaam_mlx import load_model
     from gigaam_mlx.audio import compute_mel
 
+    from .mlx_cache import limit_cache
+
+    limit_cache()
     model, tokenizer = load_model(model_type=model_type)
 
     def decode(audio: np.ndarray) -> str:

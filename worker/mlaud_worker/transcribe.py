@@ -24,6 +24,9 @@ class Transcriber:
         if self._model is None:
             from gigaam_mlx import load_model
 
+            from .mlx_cache import limit_cache
+
+            limit_cache()
             self._model, self._tokenizer = load_model(model_type=self.model_type)
             _T.load_audio = load_audio  # ffmpeg-free декодирование
 

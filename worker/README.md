@@ -9,6 +9,8 @@
 - `audio.py` — декодирование без ffmpeg: `afconvert` (macOS) + `soundfile` + ресемплинг `soxr` до 16 кГц.
   ⚠️ Всегда читаем фактическую частоту и ресемплим (ADR-014; иначе баг 48к→мусор).
 - `transcribe.py` — обёртка над `gigaam-mlx`: модель грузится один раз, ffmpeg-free загрузчик.
+- `mlx_cache.py` — предел кэша MLX 1 ГБ, ставится до загрузки модели в `transcribe.py` и `dictate.py`.
+  Без него MLX копит освобождённые буферы до 45.6 ГБ: ~29 ГБ на 18-минутной записи, 7 ГБ за 22 с диктовки.
 - `output.py` — форматирование `.txt` (с тайм-кодами) и `.srt`.
 - `telegram.py` — доставка файлом (`sendDocument`); sender инъектируется для тестов.
   `python -m mlaud_worker.telegram --test` — тестовое сообщение по `MLAUD_TG_TOKEN` /
