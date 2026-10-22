@@ -207,7 +207,7 @@ def transcribe(engine: Engine, args: dict) -> str:
 
 
 def _materialize(b64: str, filename: str) -> Path:
-    """base64 → временный файл с исходным расширением (по нему afconvert выбирает формат)."""
+    """base64 → временный файл с исходным расширением (по нему декодер выбирает формат)."""
     if len(b64) > MAX_BASE64_BYTES * 4 // 3 + 4:
         raise ToolError(f"audio_base64 больше {MAX_BASE64_BYTES // (1024 * 1024)} МБ — "
                         "передай путь к файлу")
@@ -324,8 +324,8 @@ TOOLS = [
         title="Распознать речь в аудиофайле",
         description=(
             "Локальное распознавание речи (GigaAM v3, русский язык) на этом Mac. "
-            "Принимает голосовые Telegram (.ogg/.oga, Opus), видеокружки (.mp4), mp3, m4a, "
-            "wav, aac, flac, aiff, caf. Передай абсолютный путь в `path` или содержимое "
+            "Принимает голосовые Telegram (.ogg/.oga, Opus), видеокружки (.mp4), записи "
+            "видеовстреч (.webm, .mkv), mp3, m4a, wav, aac, flac, aiff, caf. Передай абсолютный путь в `path` или содержимое "
             "файла в `audio_base64` с `filename`. Возвращает текст. Запись не сохраняется "
             "в архив MLaud и не отправляется в Niti."
         ),

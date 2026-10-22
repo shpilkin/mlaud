@@ -95,7 +95,8 @@ public struct RecordingIndex {
     }
 
     static let audioExtensions: Set<String> = [
-        "m4a", "mp3", "wav", "aac", "flac", "ogg", "opus", "mp4", "aiff", "aif", "caf", "m4b", "amr",
+        "m4a", "mp3", "wav", "aac", "flac", "ogg", "oga", "opus", "mp4", "webm", "mkv", "aiff", "aif",
+        "caf", "m4b", "amr",
     ]
 
     /// Все записи, новые сверху. Каталог периода — любой подкаталог архива; файл — любой

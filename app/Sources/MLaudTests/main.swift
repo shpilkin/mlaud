@@ -1639,6 +1639,20 @@ test("RecordingIndex: имена говорящих звонка — из channe
     eq(withoutArchive.first { $0.base == "2026-09-04_15-30-05" }!.speakers, [], "без archiveRoot channels.json не читается")
 }
 
+test("InboxScanner: записи видеовстреч и голосовые Telegram — аудио") {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("scan-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let scanner = InboxScanner()
+    for name in ["Видеовстреча 2026-10-22_093844.webm", "voice.OGG", "note.oga", "call.mkv", "x.opus", "y.flac", "doc.pdf"] {
+        try Data(repeating: 1, count: 16).write(to: dir.appendingPathComponent(name))
+    }
+    for name in ["Видеовстреча 2026-10-22_093844.webm", "voice.OGG", "note.oga", "call.mkv", "x.opus", "y.flac"] {
+        check(scanner.isReady(dir.appendingPathComponent(name)), "\(name) — аудио")
+    }
+    check(!scanner.isReady(dir.appendingPathComponent("doc.pdf")), "pdf — не аудио")
+}
+
 // MARK: AgentAccess (MCP для внешних агентов)
 
 test("AgentAccess: события процесса сервера") {

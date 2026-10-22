@@ -86,6 +86,16 @@ def test_list_audio_only_ready_audio(tmp_path):
     assert names == ["a.m4a", "b.m4a"]  # отсортировано, только готовые аудио
 
 
+def test_list_audio_takes_meeting_and_voice_formats(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.inbox.mkdir(parents=True)
+    for name in ("Видеовстреча.webm", "voice.OGG", "note.oga", "call.mkv", "x.opus",
+                 "y.flac", "z.mp4", "skip.pdf"):
+        (cfg.inbox / name).write_bytes(b"x")
+    assert [p.name for p in list_audio(cfg)] == [
+        "call.mkv", "note.oga", "voice.OGG", "x.opus", "y.flac", "z.mp4", "Видеовстреча.webm"]
+
+
 def test_derive_period_from_prefix(tmp_path):
     f = tmp_path / "2026-06-21_14-30-00.m4a"; f.write_bytes(b"x")
     assert derive_period(f) == "2026-06"  # месяц, не день

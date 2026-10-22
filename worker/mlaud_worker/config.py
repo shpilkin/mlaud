@@ -4,7 +4,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_AUDIO_EXTS = (".m4a", ".mp3", ".wav", ".aac", ".aiff", ".caf")
+# webm/mkv/ogg/opus CoreAudio не открывает — их декодирует ffmpeg (audio.py).
+DEFAULT_AUDIO_EXTS = (".m4a", ".mp3", ".wav", ".aac", ".aiff", ".caf", ".flac",
+                      ".mp4", ".webm", ".mkv", ".ogg", ".oga", ".opus")
 
 
 @dataclass

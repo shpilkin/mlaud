@@ -2,7 +2,10 @@ import Foundation
 
 /// Поддерживаемые расширения аудио (зеркало DEFAULT_AUDIO_EXTS в Python-worker'е).
 public enum AudioExtensions {
-    public static let `default`: Set<String> = ["m4a", "mp3", "wav", "aac", "aiff", "caf"]
+    public static let `default`: Set<String> = [
+        "m4a", "mp3", "wav", "aac", "aiff", "caf", "flac",
+        "mp4", "webm", "mkv", "ogg", "oga", "opus",
+    ]
 }
 
 /// Сканирует папку inbox и возвращает готовые к обработке аудиофайлы.
