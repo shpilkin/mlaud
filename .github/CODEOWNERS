@@ -1,0 +1,3 @@
+# Владелец всего репозитория. Любой pull request требует его ревью
+# (вместе с правилом «Require review from Code Owners» в защите ветки main).
+* @shpilkin
