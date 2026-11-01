@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .config import Config
+from .delivery_queue import MAX_ATTEMPTS
 from .pipeline import process_inbox
 from .telegram import TelegramNotifier
 
@@ -28,6 +29,17 @@ def load_dotenv() -> None:
         key, val = key.strip(), val.strip().strip('"').strip("'")
         if key and val and key not in os.environ:
             os.environ[key] = val
+
+
+def _flag(key: str) -> bool:
+    return os.environ.get(key, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _float_env(key: str, default: float) -> float:
+    try:
+        return float(os.environ[key])
+    except (KeyError, ValueError):
+        return default
 
 
 def build_config() -> Config:
@@ -59,6 +71,15 @@ def build_config() -> Config:
             cfg.num_speakers = int(os.environ["MLAUD_NUM_SPEAKERS"])
         except ValueError:
             cfg.num_speakers = 0
+    # Голос-ID поверх диаризации (Фаза 3).
+    if os.environ.get("MLAUD_IDENTIFY"):
+        cfg.identify = _flag("MLAUD_IDENTIFY")
+    if os.environ.get("MLAUD_VOICES_DIR"):
+        cfg.voices_dir = os.environ["MLAUD_VOICES_DIR"]
+    if os.environ.get("MLAUD_PROMPTER_DIR"):
+        cfg.prompter_dir = os.environ["MLAUD_PROMPTER_DIR"]
+    cfg.identify_threshold = _float_env("MLAUD_IDENTIFY_THRESHOLD", cfg.identify_threshold)
+    cfg.identify_min_speech = _float_env("MLAUD_IDENTIFY_MIN_SPEECH", cfg.identify_min_speech)
     cfg.__post_init__()
     return cfg
 
@@ -82,8 +103,14 @@ def main() -> int:
         print(f"RESEND {base}: недоставленный ранее транскрипт отправлен")
     for r in result["processed"]:
         delivery = r.get("delivery", "?")
+        speakers = r.get("speakers") or {}
+        tail = ""
+        if speakers.get("status") == "written":
+            tail = f" [к разметке: {speakers.get('pending', 0)}]"
+        elif speakers.get("status"):
+            tail = f" [сайдкар голосов: {speakers['status']}]"
         print(f"OK   {r['source']} -> {r['txt']} ({r['segments']} segments) "
-              f"[доставка: {delivery}]")
+              f"[доставка: {delivery}]{tail}")
         # Провал доставки раньше был невидим: _deliver ловит ошибку сам, а OK
         # печатался всегда. Теперь дублируем в stderr, чтобы строка попала в
         # хвост лога и в текст ошибки в меню приложения.
@@ -93,12 +120,23 @@ def main() -> int:
                   file=sys.stderr)
     for e in result["errors"]:
         print(f"FAIL {e['source']}: {e['error']}", file=sys.stderr)
+    if result.get("identify_error"):
+        print(f"WARN база голосов не прочитана, имена не подставлены — "
+              f"{result['identify_error']}", file=sys.stderr)
+    # Исчерпавшие лимит попыток: больше не досылаются, транскрипт остаётся на диске.
+    given_up = result.get("given_up", [])
+    for g in given_up:
+        print(f"GIVEUP {g['base']}: не доставлено за {MAX_ATTEMPTS} попыт(ки) — "
+              f"транскрипт на диске: {g['txt']}", file=sys.stderr)
     # Очередь недоставленного: транскрипты сохранены, уйдут автоматически при появлении сети.
     pending = result.get("pending", [])
     if pending:
         print(f"WARN в очереди на доставку: {len(pending)} — {', '.join(pending)} "
               f"(доставятся сами при появлении сети)", file=sys.stderr)
-    return 1 if (result["errors"] or delivery_failed or pending) else 0
+    # Непустая очередь сама по себе — не ошибка прогона, а штатное ожидание сети.
+    # Раньше она давала exit 1, а приложение считало ненулевой код поводом показать
+    # уведомление и тут же перезапустить worker — получался busy-loop на каждом обрыве.
+    return 1 if (result["errors"] or delivery_failed or given_up) else 0
 
 
 if __name__ == "__main__":

@@ -1,0 +1,8 @@
+{"t":"start","call_dir":"/Users/x/ASR/Prompter/calls/2026-09-04_15-30-05","brief_dir":"/Users/x/ASR/Prompter/briefs/interview-ivan","profile":"/Users/x/ASR/Prompter/profile.md","templates_dir":"/Users/x/ASR/Prompter/templates","mode":"vks","expected_min":60,"connection":{"base_url":"https://openrouter.ai/api/v1","model":"deepseek/deepseek-v4-flash","reasoning":{"enabled":false},"price_per_mtok":{"in":null,"out":null,"cached":null}},"limits":{"rpm":6,"cost_ceiling_usd":0.5,"debounce_sec":2.5,"warm_every_sec":240}}
+{"t":"start","call_dir":"/c","brief_dir":"/b","profile":"/p","templates_dir":"/t","mode":"offline","expected_min":30,"connection":{"base_url":"https://openrouter.ai/api/v1","model":"z-ai/glm-5.3-flash","reasoning":{"effort":"low"},"price_per_mtok":{"in":0.5,"out":2,"cached":0.05}},"limits":{"rpm":3,"cost_ceiling_usd":null,"debounce_sec":2.5,"warm_every_sec":240}}
+{"t":"start","call_dir":"/c","brief_dir":"/b","profile":"/p","templates_dir":"/t","mode":"vks","expected_min":60,"connection":{"base_url":"http://127.0.0.1:8080","model":"qwen3","price_per_mtok":{"in":null,"out":null,"cached":null}},"limits":{"rpm":6,"cost_ceiling_usd":0.5,"debounce_sec":2.5,"warm_every_sec":240}}
+{"t":"turn","reason":"them_phrase","elapsed_sec":1830,"lines":[{"ch":"them","label":"Иван","t0":1822.4,"t1":1829.1,"text":"Добрый день"},{"ch":"me","label":"Я","t0":1810,"t1":1815.2,"text":"Здравствуйте"}],"agenda_manual":[{"item":"Кейс-задача","status":"done"}],"notes":""}
+{"t":"pause","on":true}
+{"t":"detail","card_id":"3.1"}
+{"t":"finish","elapsed_sec":3540,"notes":"заметка"}
+{"t":"quit"}

@@ -19,6 +19,7 @@ def make_cfg(tmp_path) -> Config:
         failed=tmp_path / "failed",
         service=tmp_path / "service",
         model_type="rnnt",
+        prompter_dir=tmp_path / "Prompter",
     )
 
 
@@ -83,6 +84,16 @@ def test_list_audio_only_ready_audio(tmp_path):
     (cfg.inbox / ".hidden.m4a").write_bytes(b"x")     # скрытый
     names = [p.name for p in list_audio(cfg)]
     assert names == ["a.m4a", "b.m4a"]  # отсортировано, только готовые аудио
+
+
+def test_list_audio_takes_meeting_and_voice_formats(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.inbox.mkdir(parents=True)
+    for name in ("Видеовстреча.webm", "voice.OGG", "note.oga", "call.mkv", "x.opus",
+                 "y.flac", "z.mp4", "skip.pdf"):
+        (cfg.inbox / name).write_bytes(b"x")
+    assert [p.name for p in list_audio(cfg)] == [
+        "call.mkv", "note.oga", "voice.OGG", "x.opus", "y.flac", "z.mp4", "Видеовстреча.webm"]
 
 
 def test_derive_period_from_prefix(tmp_path):
@@ -322,3 +333,291 @@ def test_no_router_installed_means_no_stray_inbox(tmp_path):
     )
     assert result["processed"][0]["artifact"] == "no-router"
     assert not (tmp_path / "EmailReader").exists()
+
+
+# --- диаризация + имена (Фаза 3) ---
+
+import numpy as np
+
+from mlaud_worker.voices import VoiceStore
+
+
+def _vec(i, dim=8, scale=2.5):
+    v = np.zeros(dim, dtype=np.float32)
+    v[i] = scale
+    return v
+
+
+class FakeWordTranscriber(FakeTranscriber):
+    def __init__(self, words):
+        super().__init__([])
+        self._words = words
+
+    def transcribe_words(self, path):
+        return list(self._words)
+
+
+class FakeDiarizer:
+    def __init__(self, turns, centroids):
+        self.turns, self.centroids = turns, centroids
+
+    def diarize(self, path, num_speakers=None):
+        return list(self.turns), dict(self.centroids)
+
+
+TURNS = [
+    {"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"},    # 40 c → достаточно для имени
+    {"start": 40.5, "end": 45.5, "speaker": "SPEAKER_01"},   # 5 c → имени не будет никогда
+]
+WORDS = [
+    {"start": 0.0, "end": 0.5, "text": "привет"},
+    {"start": 0.5, "end": 1.0, "text": "всем"},
+    {"start": 41.0, "end": 41.5, "text": "угу"},
+]
+CENTROIDS = {"SPEAKER_00": _vec(0), "SPEAKER_01": _vec(1)}
+
+
+def _run_diarized(tmp_path, identify: bool, enroll: bool = True):
+    cfg = make_cfg(tmp_path)
+    cfg.identify = identify
+    cfg.voices_dir = tmp_path / "voices"
+    cfg.inbox.mkdir(parents=True)
+    if enroll:
+        # в базе и «Милана Г» (= SPEAKER_00), и голос короткого кластера — он всё равно
+        # не должен получить имени
+        store = VoiceStore(cfg.voices_dir)
+        store.add("Милана Г", _vec(0), source_file="old.m4a", label="SPEAKER_02", speech_sec=200)
+        store.add("Гость", _vec(1), source_file="old.m4a", label="SPEAKER_03", speech_sec=60)
+    (cfg.inbox / "2026-06-21_rec.m4a").write_bytes(b"x")
+    result = process_inbox(cfg, transcriber=FakeWordTranscriber(WORDS),
+                           diarizer=FakeDiarizer(TURNS, CENTROIDS), use_lock=False)
+    assert result["errors"] == []
+    r = result["processed"][0]
+    return r["txt"].read_text("utf-8"), r["srt"].read_text("utf-8"), r
+
+
+def test_identify_puts_name_into_txt_and_srt(tmp_path):
+    txt, srt, r = _run_diarized(tmp_path, identify=True)
+    assert txt == "[00:00:00] Милана Г: привет всем\n[00:00:41] Спикер 2: угу\n"
+    assert "Милана Г: привет всем" in srt and "Спикер 2: угу" in srt
+    # сайдкар для окна «Голоса»: узнан уверенно → к разметке нечего
+    assert r["speakers"]["status"] == "written" and r["speakers"]["pending"] == 0
+    from mlaud_worker import speakers as spk
+    sidecar = spk.load(Path(r["speakers"]["path"]))
+    assert sidecar["source"] == "2026-06-21_rec.m4a" and sidecar["txt"] == str(r["txt"])
+    assert sidecar["clusters"][0]["match"]["name"] == "Милана Г"
+    assert sidecar["clusters"][0]["written"] == "Милана Г"
+    assert "clips_error" in sidecar                       # аудио-заглушка не декодируется
+
+
+def test_identify_off_gives_previous_output_even_with_voices_on_disk(tmp_path):
+    txt, srt, r = _run_diarized(tmp_path, identify=False)
+    assert txt == "[00:00:00] Спикер 1: привет всем\n[00:00:41] Спикер 2: угу\n"
+    assert "Спикер 1: привет всем" in srt
+    assert r["speakers"] is None                          # без идентификации сайдкара нет
+
+
+def test_identify_broken_voices_index_degrades_to_speaker_n(tmp_path):
+    """Испорченный index.json: транскрипт делается без имён, прогон не падает."""
+    cfg = make_cfg(tmp_path)
+    cfg.identify = True
+    cfg.voices_dir = tmp_path / "voices"
+    cfg.voices_dir.mkdir()
+    (cfg.voices_dir / "index.json").write_text("{не json", encoding="utf-8")
+    cfg.inbox.mkdir(parents=True)
+    (cfg.inbox / "2026-06-21_rec.m4a").write_bytes(b"x")
+    result = process_inbox(cfg, transcriber=FakeWordTranscriber(WORDS),
+                           diarizer=FakeDiarizer(TURNS, CENTROIDS), use_lock=False)
+    assert result["errors"] == []
+    assert result["identify_error"]
+    txt = result["processed"][0]["txt"].read_text("utf-8")
+    assert txt.startswith("[00:00:00] Спикер 1: привет всем")
+
+
+def test_identify_with_empty_voices_dir_is_previous_output(tmp_path):
+    txt, _, r = _run_diarized(tmp_path, identify=True, enroll=False)
+    assert txt == "[00:00:00] Спикер 1: привет всем\n[00:00:41] Спикер 2: угу\n"
+    # пустая база: сайдкар всё равно пишется — иначе первый голос завести неоткуда
+    assert r["speakers"]["status"] == "written" and r["speakers"]["pending"] == 1
+
+
+# --- запись звонка Суфлёра: сайдкар каналов (этап 3) ---
+
+import json
+
+import soundfile as sf
+
+from mlaud_worker import channels as chn
+from mlaud_worker.pipeline import process_file
+
+
+def _call_wav(path: Path, seconds: float = 1.0, stereo: bool = True) -> Path:
+    sr = 16000
+    t = np.arange(int(sr * seconds)) / sr
+    left = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    data = np.stack([left, np.zeros_like(left)], axis=1) if stereo else left
+    sf.write(str(path), data, sr, subtype="PCM_16")
+    return path
+
+
+def _call_sidecar(audio: Path, **override) -> Path:
+    raw = {"version": 1, "call_id": audio.stem, "channels": {"0": "Я", "1": "Собеседник"}}
+    raw.update(override)
+    side = chn.sidecar_path(audio)
+    side.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    return side
+
+
+class ChannelTranscriber(FakeTranscriber):
+    """Реплики по имени дорожки: ch0.wav — «Я», ch1.wav — собеседник."""
+
+    def __init__(self):
+        super().__init__([])
+        self.paths = []
+
+    def transcribe(self, path):
+        self.paths.append(Path(path).name)
+        if Path(path).name == "ch0.wav":
+            return [{"start": 0.0, "end": 1.0, "text": "привет"}]
+        if Path(path).name == "ch1.wav":
+            return [{"start": 2.0, "end": 3.0, "text": "здравствуйте"}]
+        raise AssertionError(f"неожиданный файл: {path}")
+
+    def transcribe_words(self, path):
+        raise AssertionError("диаризация не должна запускаться для записи с сайдкаром")
+
+
+class NoDiarizer(FakeDiarizer):
+    def diarize(self, path, num_speakers=None):
+        raise AssertionError("диаризация не должна запускаться для записи с сайдкаром")
+
+
+def test_process_file_with_channels_sidecar(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.identify = True
+    cfg.voices_dir = tmp_path / "voices"
+    cfg.inbox.mkdir(parents=True)
+    audio = _call_wav(cfg.inbox / "2026-09-04_15-30-05.wav")
+    _call_sidecar(audio)
+    tr = ChannelTranscriber()
+
+    r = process_file(audio, cfg, tr, notifier=None, diarizer=NoDiarizer(TURNS, CENTROIDS),
+                     gallery={})
+
+    assert tr.paths == ["ch0.wav", "ch1.wav"]
+    txt = r["txt"].read_text("utf-8")
+    assert txt == "[00:00:00] Я: привет\n[00:00:02] Собеседник: здравствуйте\n"
+    assert r["speakers"] is None and not (cfg.service / "speakers").exists()
+    assert r["channels"] == {"0": "Я", "1": "Собеседник"}
+    assert r["segments"] == 2
+    # архив: аудио и сайдкар рядом, в inbox ничего
+    assert (cfg.processed / "2026-09" / "2026-09-04_15-30-05.wav").exists()
+    assert (cfg.processed / "2026-09" / "2026-09-04_15-30-05.channels.json").exists()
+    assert list(cfg.inbox.iterdir()) == []
+    meta = json.loads(Path(str(r["txt"]).replace(".txt", ".meta.json")).read_text("utf-8"))
+    assert meta["started_at"].startswith("2026-09-04T15:30:05")
+    assert meta["started_at_source"] == "sidecar"
+    assert meta["prompter"]["outcome_path"] is None   # итогов нет — блок с null (§3.7/D2)
+
+
+def test_process_file_without_sidecar_unchanged(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.inbox.mkdir(parents=True)
+    audio = _call_wav(cfg.inbox / "2026-09-04_15-30-05.wav")
+
+    class CountingDiarizer(FakeDiarizer):
+        calls = 0
+
+        def diarize(self, path, num_speakers=None):
+            CountingDiarizer.calls += 1
+            return super().diarize(path, num_speakers)
+
+    r = process_file(audio, cfg, FakeWordTranscriber(WORDS), notifier=None,
+                     diarizer=CountingDiarizer(TURNS, CENTROIDS))
+    assert CountingDiarizer.calls == 1                 # обычный путь: analyze с диаризацией
+    assert r["channels"] is None
+    assert r["txt"].read_text("utf-8").startswith("[00:00:00] Спикер 1: привет всем")
+    meta = json.loads(Path(str(r["txt"]).replace(".txt", ".meta.json")).read_text("utf-8"))
+    assert meta["started_at_source"] != "sidecar"
+
+
+def test_process_file_with_prompter_outcome_adds_block(tmp_path):
+    """§3.7: итоги лежат в Prompter/calls/<id>/outcome.md — конвейер копирует их рядом с
+    транскриптом, доставляет после транскрипта и берёт goal из brief.md по call.json."""
+    cfg = make_cfg(tmp_path)
+    cfg.inbox.mkdir(parents=True)
+    audio = _call_wav(cfg.inbox / "2026-09-04_15-30-05.wav")
+    _call_sidecar(audio, brief="про бюджет")
+    call_dir = cfg.prompter_dir / "calls" / "2026-09-04_15-30-05"
+    call_dir.mkdir(parents=True)
+    (call_dir / "call.json").write_text(json.dumps(
+        {"version": 1, "call_id": "2026-09-04_15-30-05", "brief_dir": "interview-ivan"}),
+        encoding="utf-8")
+    (call_dir / "outcome.md").write_text("# итоги", encoding="utf-8")
+    briefs = cfg.prompter_dir / "briefs" / "interview-ivan"
+    briefs.mkdir(parents=True)
+    (briefs / "brief.md").write_text(
+        "---\ntitle: Интервью\nmode: vks\ngoal: решить, нанимать\n---\n", encoding="utf-8")
+    notifier = FakeNotifier()
+
+    r = process_file(audio, cfg, ChannelTranscriber(), notifier=notifier)
+    meta = json.loads(Path(str(r["txt"]).replace(".txt", ".meta.json")).read_text("utf-8"))
+    assert list(meta)[-1] == "prompter"
+    assert meta["prompter"] == {
+        "call_id": "2026-09-04_15-30-05", "brief": "про бюджет", "goal": "решить, нанимать",
+        "outcome_path": "out/2026-09/2026-09-04_15-30-05.prompter.md",
+    }
+    # Доставка: сначала транскрипт, потом итоги (FP:642-644).
+    assert [Path(path).name for path, _ in notifier.docs] == [
+        "2026-09-04_15-30-05.txt", "2026-09-04_15-30-05.prompter.md"]
+    assert notifier.docs[1][1] == "2026-09-04_15-30-05 — итоги"
+    assert r["outcome_delivery"] == "sent"
+
+
+def test_process_file_without_outcome_stays_unchanged(tmp_path):
+    """Итоги опоздали/отменены: outcome_path null, goal null, доставка только транскрипта."""
+    cfg = make_cfg(tmp_path)
+    cfg.inbox.mkdir(parents=True)
+    audio = _call_wav(cfg.inbox / "2026-09-04_15-30-05.wav")
+    _call_sidecar(audio, brief="про бюджет")
+    notifier = FakeNotifier()
+
+    r = process_file(audio, cfg, ChannelTranscriber(), notifier=notifier)
+    meta = json.loads(Path(str(r["txt"]).replace(".txt", ".meta.json")).read_text("utf-8"))
+    assert "prompter" in meta and meta["prompter"]["outcome_path"] is None
+    assert meta["prompter"]["goal"] is None
+    assert [Path(path).name for path, _ in notifier.docs] == ["2026-09-04_15-30-05.txt"]
+    assert r["outcome_delivery"] == "none"
+
+
+def test_process_inbox_quarantines_audio_with_broken_sidecar(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.inbox.mkdir(parents=True)
+    audio = _call_wav(cfg.inbox / "2026-09-04_15-30-05.wav")
+    side = chn.sidecar_path(audio)
+    side.write_text('{"version":1}', encoding="utf-8")
+    notifier = FakeNotifier()
+    tr = ChannelTranscriber()
+
+    result = process_inbox(cfg, transcriber=tr, notifier=notifier, use_lock=False)
+
+    assert result["processed"] == []
+    assert result["errors"][0]["source"] == audio.name
+    assert tr.paths == []                               # до транскрипции не дошло
+    assert not audio.exists() and not side.exists()
+    assert (cfg.failed / audio.name).exists() and (cfg.failed / side.name).exists()
+    assert notifier.errors and audio.name in notifier.errors[0]
+    # повторный прогон — inbox пуст, ошибок нет
+    assert process_inbox(cfg, transcriber=tr, notifier=notifier, use_lock=False)["errors"] == []
+
+
+def test_process_file_sidecar_with_mono_audio_fails(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.inbox.mkdir(parents=True)
+    audio = _call_wav(cfg.inbox / "2026-09-04_15-30-05.wav", stereo=False)
+    side = _call_sidecar(audio)
+    tr = ChannelTranscriber()
+    with pytest.raises(chn.SidecarError, match="моно"):
+        process_file(audio, cfg, tr, diarizer=NoDiarizer(TURNS, CENTROIDS))
+    assert tr.paths == []
+    assert audio.exists() and side.exists()             # карантин — дело process_inbox

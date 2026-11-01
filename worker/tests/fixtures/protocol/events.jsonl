@@ -1,0 +1,12 @@
+{"t":"ready","context_tokens":31400,"materials":[{"name":"резюме.pdf","kind":"pdf","tokens":2100,"warning":null},{"name":"скан.pdf","kind":"pdf","tokens":0,"warning":"нет текстового слоя, пропущен"}],"warnings":["скан.pdf: нет текстового слоя, пропущен"],"profile_empty":false}
+{"t":"warm","ok":true,"ttft_ms":1900,"usage":{"prompt_tokens":31400,"completion_tokens":1,"cached_tokens":0,"reasoning_tokens":0},"cost_usd":0.008}
+{"t":"warm","ok":false,"message":"сеть недоступна"}
+{"t":"card","turn":3,"card":{"id":"3.1","type":"answer","priority":1,"text":"Спроси про кейс","source":""}}
+{"t":"cards","turn":3,"cards":[{"id":"3.1","type":"answer","priority":1,"text":"Спроси про кейс","source":""},{"id":"3.2","type":"fact","priority":2,"text":"В резюме: 6 лет в X","source":"резюме.pdf"}],"agenda":[{"item":"Опыт: два кейса подробно","status":"active"}],"flags":{"question_pending":true},"usage":{"prompt_tokens":33800,"completion_tokens":310,"cached_tokens":33024,"reasoning_tokens":0},"first_card_ms":3400,"latency_ms":5700,"cost_usd":0.001,"cost_total_usd":0.012}
+{"t":"detail","card_id":"3.1","text":"Подробнее: спроси про второй кейс и метрики."}
+{"t":"waiting","reason":"rpm","sec":12}
+{"t":"paused","reason":"cost_ceiling","cost_usd":0.051,"ceiling_usd":0.05}
+{"t":"outcome","ok":true,"outcome":{"goal_result":"partial","reason":"кейс-задачу не успели","summary":"кандидат сильный","decisions":["дойти до кейса во второй встрече"],"next_steps":["отправить тестовое"],"open_questions":[],"assessment":[{"criterion":"системность","verdict":"да","evidence":"разложил задачу по шагам"}]},"usage":{"prompt_tokens":34000,"completion_tokens":400,"cached_tokens":33024,"reasoning_tokens":0},"latency_ms":8100,"cost_usd":0.002,"cost_total_usd":0.014,"path":"/Users/x/ASR/Prompter/calls/2026-09-04_15-30-05/outcome.md"}
+{"t":"outcome","ok":false,"message":"суфлёр выключен","cost_total_usd":0.012}
+{"t":"error","message":"модель ответила 5xx","retry_in_sec":10,"turn":3}
+{"t":"error","message":"нет ключа: MLAUD_LLM_KEY пуст","fatal":true}

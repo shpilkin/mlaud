@@ -110,3 +110,55 @@ def test_output_without_speaker_unchanged():
     # сегменты без диаризации форматируются как раньше (без префикса)
     txt = build_txt(SEGS)
     assert txt.startswith("[00:00:00] Первая реплика.")
+
+
+# --- имена вместо «Спикер N» (Фаза 3) ---
+
+import numpy as np
+
+from mlaud_worker.diarize import name_speakers, speech_seconds
+from mlaud_worker.spkid import build_gallery
+
+
+def _vec(i, dim=8):
+    v = np.zeros(dim)
+    v[i] = 1.0
+    return v
+
+
+def test_speech_seconds_sums_turns():
+    assert speech_seconds(TURNS) == {"SPEAKER_01": 8.0, "SPEAKER_00": 4.0}
+    assert speech_seconds([]) == {}
+
+
+def test_group_words_uses_given_mapping():
+    words = [{"start": 0.0, "end": 0.5, "text": "привет"},
+             {"start": 5.0, "end": 5.5, "text": "угу"}]
+    segs = group_words_by_speaker(words, TURNS, mapping={"SPEAKER_01": "Милана Г", "SPEAKER_00": "Спикер 2"})
+    assert [s["speaker"] for s in segs] == ["Милана Г", "Спикер 2"]
+
+
+def test_name_speakers_empty_gallery_is_plain_relabel():
+    cents = {"SPEAKER_00": _vec(0), "SPEAKER_01": _vec(1)}
+    assert name_speakers(TURNS, cents, {}, 0.75, 30.0) == relabel(TURNS)
+    assert name_speakers(TURNS, {}, build_gallery({"A": [_vec(0)]}), 0.75, 30.0) == relabel(TURNS)
+
+
+def test_name_speakers_names_known_keeps_numbering_and_filter():
+    # SPEAKER_01 говорит 8 c, SPEAKER_00 — 4 c; порог по речи 5 c, чтобы фильтр был виден
+    cents = {"SPEAKER_00": _vec(0), "SPEAKER_01": _vec(1)}
+    gallery = build_gallery({"Милана Г": [_vec(1)], "я": [_vec(0)]})
+    names = name_speakers(TURNS, cents, gallery, 0.75, 5.0)
+    # SPEAKER_01 первый по времени → был бы «Спикер 1», стал именем;
+    # SPEAKER_00 короче фильтра → остался «Спикер 2» (номер не сдвинулся)
+    assert names == {"SPEAKER_01": "Милана Г", "SPEAKER_00": "Спикер 2"}
+    names = name_speakers(TURNS, cents, gallery, 0.75, 0.0)
+    assert names == {"SPEAKER_01": "Милана Г", "SPEAKER_00": "я"}
+
+
+def test_name_speakers_unsure_band_marks_name():
+    cents = {"SPEAKER_01": 0.77 * _vec(1) + np.sqrt(1 - 0.77 ** 2) * _vec(2), "SPEAKER_00": _vec(5)}
+    gallery = build_gallery({"Милана Г": [_vec(1)]})
+    names = name_speakers(TURNS, cents, gallery, 0.75, 0.0)
+    assert names["SPEAKER_01"] == "Милана Г(?)"
+    assert names["SPEAKER_00"] == "Спикер 2"

@@ -58,14 +58,57 @@ def _best_speaker(start: float, end: float, turns: list[dict]):
     return best
 
 
+def speech_seconds(turns: list[dict]) -> dict:
+    """Суммарная речь каждого кластера, с: сумма длительностей его реплик."""
+    total: dict = {}
+    for t in turns:
+        total[t["speaker"]] = total.get(t["speaker"], 0.0) + (t["end"] - t["start"])
+    return total
+
+
+def identify_speakers(turns: list[dict], centroids: dict, gallery: dict,
+                      threshold: float, min_speech: float) -> dict:
+    """SPEAKER_NN → spkid.Identity для кластеров с эмбеддингом; пусто без базы."""
+    if not gallery or not centroids:
+        return {}
+    from .spkid import identify
+
+    speech = speech_seconds(turns)
+    clusters = {raw: (centroids[raw], speech.get(raw, 0.0))
+                for raw in relabel(turns) if raw in centroids}
+    return identify(clusters, gallery, threshold, min_speech)
+
+
+def name_speakers(turns: list[dict], centroids: dict, gallery: dict,
+                  threshold: float, min_speech: float,
+                  label_fmt: str = "Спикер {n}", idents: Optional[dict] = None) -> dict:
+    """SPEAKER_NN → имя из базы, «Имя(?)» или «Спикер N».
+
+    Нумерация «Спикер N» — по первому появлению среди ВСЕХ кластеров, включая
+    названные: один и тот же файл даёт одни и те же номера с идентификацией и без,
+    и по ним можно enroll'ить (voices.py). Пустая база — ровно relabel().
+    `idents` — готовый результат identify_speakers(), чтобы не считать дважды.
+    """
+    mapping = relabel(turns, label_fmt)
+    if idents is None:
+        idents = identify_speakers(turns, centroids, gallery, threshold, min_speech)
+    for raw, ident in idents.items():
+        if ident.display is not None:
+            mapping[raw] = ident.display
+    return mapping
+
+
 def group_words_by_speaker(words: list[dict], turns: list[dict],
-                           label_fmt: str = "Спикер {n}") -> list[dict]:
+                           label_fmt: str = "Спикер {n}",
+                           mapping: Optional[dict] = None) -> list[dict]:
     """Разметить слова спикерами и склеить подряд идущие слова одного спикера в реплики.
 
     Это точная диаризация: границы реплик проходят по сменам спикера внутри речи,
     а не по 20-сек чанкам ASR. Возвращает сегменты [{'start','end','text','speaker'?}].
+    `mapping` — готовые подписи SPEAKER_NN → текст (см. name_speakers); без него — relabel().
     """
-    mapping = relabel(turns, label_fmt)
+    if mapping is None:
+        mapping = relabel(turns, label_fmt)
     segments: list[dict] = []
     last_raw = object()  # sentinel, не равен ни одному спикеру и None
     for w in words:
@@ -112,16 +155,23 @@ class Diarizer:
         pipeline.to(torch.device(dev))
         self._pipeline = pipeline
 
-    def diarize(self, path: str, num_speakers: Optional[int] = None) -> list[dict]:
-        """Вернуть интервалы спикеров: [{'start', 'end', 'speaker'}], speaker = SPEAKER_NN."""
+    def diarize(self, path: str, num_speakers: Optional[int] = None) -> tuple:
+        """Интервалы спикеров и центроиды кластеров.
+
+        Возвращает (turns, centroids): turns = [{'start', 'end', 'speaker'}],
+        speaker = SPEAKER_NN; centroids = {SPEAKER_NN: (256,) float32} — сырые, как
+        отдал pyannote (не нормированные), в том числе нулевые строки-добивки.
+        Эмбеддинги пайплайн считает и так; просить их не стоит ничего.
+        """
         self._ensure_loaded()
         import torch
 
         wav = load_audio(path)  # float32 mono @16k
         waveform = torch.from_numpy(wav).unsqueeze(0)  # (1, samples)
-        annotation = self._pipeline(
+        annotation, embeddings = self._pipeline(
             {"waveform": waveform, "sample_rate": TARGET_SR},
             num_speakers=num_speakers,
+            return_embeddings=True,
         )
         turns = []
         for segment, _, speaker in annotation.itertracks(yield_label=True):
@@ -130,4 +180,8 @@ class Diarizer:
                  "end": float(segment.end),
                  "speaker": str(speaker)}
             )
-        return turns
+        centroids = {}
+        if embeddings is not None:  # None только у OracleClustering
+            for i, label in enumerate(annotation.labels()):
+                centroids[str(label)] = embeddings[i]
+        return turns, centroids

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Состояние обработки для отображения в строке меню.
-public enum ProcessingStatus: Equatable {
+public enum ProcessingStatus: Equatable, Sendable {
     case idle
     case noFolder
     case processing(current: Int, total: Int)

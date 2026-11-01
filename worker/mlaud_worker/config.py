@@ -4,7 +4,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_AUDIO_EXTS = (".m4a", ".mp3", ".wav", ".aac", ".aiff", ".caf")
+# webm/mkv/ogg/opus CoreAudio не открывает — их декодирует ffmpeg (audio.py).
+DEFAULT_AUDIO_EXTS = (".m4a", ".mp3", ".wav", ".aac", ".aiff", ".caf", ".flac",
+                      ".mp4", ".webm", ".mkv", ".ogg", ".oga", ".opus")
 
 
 @dataclass
@@ -21,10 +23,18 @@ class Config:
     hf_token: str = ""
     diarize_device: str = "mps"   # 'mps' на Apple Silicon ~22x быстрее CPU; 'cpu' как запасной
     num_speakers: int = 0         # 0 = автоопределение
+    # Голос-ID (Фаза 3) — опция поверх диаризации: без diarize не включается.
+    # Пороги и фильтр измерены, а не назначены (ADR-016).
+    identify: bool = False
+    voices_dir: Path = field(default_factory=lambda: Path.home() / "ASR/voices")  # не iCloud: биометрия
+    identify_threshold: float = 0.75    # пресеты: строго 0.80 / баланс 0.75 / мягко 0.70
+    identify_min_speech: float = 30.0   # c речи в кластере; короче — имени нет никогда (FR-8.9)
     # Папка обмена роутера (Niti). None = сдача артефактов выключена, конвейер работает
     # ровно как раньше. Путь задаётся снаружи: у роутера каталог данных переопределяется
     # переменной окружения, поэтому хардкодить его нельзя.
     router_inbox: Path | None = None
+    # Папка Суфлёра: profile.md, templates/, briefs/, calls/ (feature-prompter.md §3.0); не iCloud.
+    prompter_dir: Path = field(default_factory=lambda: Path.home() / "ASR/Prompter")
 
     def __post_init__(self):
         self.inbox = Path(self.inbox)
@@ -32,6 +42,8 @@ class Config:
         self.processed = Path(self.processed)
         self.failed = Path(self.failed)
         self.service = Path(self.service)
+        self.voices_dir = Path(self.voices_dir)
+        self.prompter_dir = Path(self.prompter_dir)
         if self.router_inbox is not None:
             self.router_inbox = Path(self.router_inbox)
 

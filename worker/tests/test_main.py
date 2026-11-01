@@ -40,6 +40,19 @@ def test_successful_delivery_is_zero(monkeypatch, capsys):
     assert out.err == ""
 
 
+def test_speakers_pending_in_ok_line(monkeypatch, capsys):
+    _patch(monkeypatch, {
+        "processed": [{"source": "a.m4a", "txt": "/out/a.txt", "segments": 3,
+                       "delivery": "sent", "speakers": {"status": "written", "pending": 2}},
+                      {"source": "b.m4a", "txt": "/out/b.txt", "segments": 1,
+                       "delivery": "sent", "speakers": {"status": "failed: boom", "pending": 0}}],
+        "errors": [],
+    })
+    assert m.main() == 0
+    out = capsys.readouterr().out
+    assert "[к разметке: 2]" in out and "[сайдкар голосов: failed: boom]" in out
+
+
 def test_transcription_error_still_nonzero(monkeypatch, capsys):
     _patch(monkeypatch, {
         "processed": [],
@@ -64,7 +77,12 @@ def test_redelivered_reported(monkeypatch, capsys):
     assert "RESEND старый разговор" in out.out
 
 
-def test_pending_queue_is_nonzero(monkeypatch, capsys):
+def test_pending_queue_is_reported_but_zero(monkeypatch, capsys):
+    """Ожидание сети — не ошибка прогона.
+
+    Ненулевой код здесь заставлял приложение показать уведомление и перезапустить
+    worker, а тот снова упирался в лежащую сеть — busy-loop раз в ~12 с.
+    """
     _patch(monkeypatch, {
         "processed": [],
         "errors": [],
@@ -73,6 +91,56 @@ def test_pending_queue_is_nonzero(monkeypatch, capsys):
     })
     code = m.main()
     out = capsys.readouterr()
-    assert code == 1  # в очереди остались недоставленные — прогон неуспешен
+    assert code == 0
     assert "в очереди на доставку: 1" in out.err
     assert "недоставленный" in out.err
+
+
+def test_given_up_is_reported_and_nonzero(monkeypatch, capsys):
+    _patch(monkeypatch, {
+        "processed": [],
+        "errors": [],
+        "redelivered": [],
+        "pending": [],
+        "given_up": [{"base": "сгоревший", "txt": "/out/сгоревший.txt"}],
+    })
+    code = m.main()
+    out = capsys.readouterr()
+    assert code == 1  # исчерпали лимит попыток — это уже отказ, а не ожидание
+    assert "GIVEUP сгоревший" in out.err
+    assert "/out/сгоревший.txt" in out.err
+
+
+def test_identify_error_is_warned_but_zero(monkeypatch, capsys):
+    _patch(monkeypatch, {
+        "processed": [{"source": "a.m4a", "txt": "/out/a.txt",
+                       "segments": 3, "delivery": "sent"}],
+        "errors": [],
+        "identify_error": "Expecting value: line 1 column 2",
+    })
+    code = m.main()
+    out = capsys.readouterr()
+    assert code == 0                       # транскрипт сделан и доставлен — это не провал
+    assert "база голосов не прочитана" in out.err
+
+
+def test_build_config_identify_env(monkeypatch):
+    for k in ("MLAUD_IDENTIFY", "MLAUD_VOICES_DIR", "MLAUD_IDENTIFY_THRESHOLD",
+              "MLAUD_IDENTIFY_MIN_SPEECH"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = m.build_config()
+    assert cfg.identify is False
+    assert cfg.voices_dir.name == "voices" and "Mobile Documents" not in str(cfg.voices_dir)
+    assert cfg.identify_threshold == 0.75 and cfg.identify_min_speech == 30.0
+
+    monkeypatch.setenv("MLAUD_IDENTIFY", "yes")
+    monkeypatch.setenv("MLAUD_VOICES_DIR", "/tmp/v")
+    monkeypatch.setenv("MLAUD_IDENTIFY_THRESHOLD", "0.8")
+    monkeypatch.setenv("MLAUD_IDENTIFY_MIN_SPEECH", "abc")     # мусор → значение по умолчанию
+    cfg = m.build_config()
+    assert cfg.identify is True
+    assert str(cfg.voices_dir) == "/tmp/v"
+    assert cfg.identify_threshold == 0.8 and cfg.identify_min_speech == 30.0
+
+    monkeypatch.setenv("MLAUD_IDENTIFY", "0")
+    assert m.build_config().identify is False

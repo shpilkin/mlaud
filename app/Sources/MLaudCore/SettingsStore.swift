@@ -13,6 +13,42 @@ public final class SettingsStore {
         public static let hfToken = "hfToken"
         public static let numSpeakers = "numSpeakers"
         public static let diarizeDevice = "diarizeDevice"
+        public static let dictation = "dictationEnabled"
+        public static let phoneSync = "phoneSyncEnabled"
+        public static let dictationKeyCode = "dictationKeyCode"
+        public static let dictationModifiers = "dictationModifiers"
+        public static let identify = "identifyEnabled"
+        public static let identifyPreset = "identifyPreset"
+        public static let callApp = "callAppBundleID"
+        public static let promptRPM = "promptRPM"
+        public static let promptCostCeiling = "promptCostCeilingUSD"
+        public static let materialsBudget = "materialsBudgetTokens"
+        public static let compactPanelAtStart = "compactPanelAtStart"
+        public static let llmConnections = "llmConnections"
+        public static let llmDefault = "llmDefaultConnection"
+        public static let agentAccess = "agentAccessEnabled"
+        public static let agentPort = "agentAccessPort"
+    }
+
+    /// Порог узнавания голоса: три пресета из замера (ADR-016), а не сырое число.
+    public enum IdentifyPreset: String, CaseIterable {
+        case strict, balanced, soft
+
+        public var threshold: Double {
+            switch self {
+            case .strict: return 0.80
+            case .balanced: return 0.75
+            case .soft: return 0.70
+            }
+        }
+
+        public var title: String {
+            switch self {
+            case .strict: return "строго (0.80) — ни одного чужого имени"
+            case .balanced: return "баланс (0.75)"
+            case .soft: return "мягко (0.70) — больше имён, изредка чужое"
+            }
+        }
     }
 
     public static let defaultModel = "rnnt"
@@ -73,6 +109,60 @@ public final class SettingsStore {
         set { defaults.set(max(0, newValue), forKey: Key.numSpeakers) }
     }
 
+    /// Диктовка по горячей клавише (⌃⌥D). По умолчанию включено: сам хоткей ничего
+    /// не делает, пока его не нажали, а разрешения спрашиваются при первом нажатии.
+    /// Приём записей с iPhone по локальной сети (замена транзита через iCloud).
+    public var phoneSyncEnabled: Bool {
+        get { defaults.object(forKey: Key.phoneSync) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: Key.phoneSync) }
+    }
+
+    public var dictationEnabled: Bool {
+        get { defaults.object(forKey: Key.dictation) == nil ? true : defaults.bool(forKey: Key.dictation) }
+        set { defaults.set(newValue, forKey: Key.dictation) }
+    }
+
+    /// Сочетание клавиш для диктовки. Хранится физическим кодом клавиши и carbon-масками
+    /// модификаторов: код не зависит от раскладки, поэтому под русской раскладкой
+    /// сочетание не переезжает на другую клавишу.
+    public var dictationHotKey: HotKey.Combo {
+        get {
+            guard defaults.object(forKey: Key.dictationKeyCode) != nil else {
+                return .controlOptionD
+            }
+            let combo = HotKey.Combo(
+                keyCode: UInt32(defaults.integer(forKey: Key.dictationKeyCode)),
+                modifiers: UInt32(defaults.integer(forKey: Key.dictationModifiers))
+            )
+            return combo.isValid ? combo : .controlOptionD
+        }
+        set {
+            guard newValue.isValid else { return }
+            defaults.set(Int(newValue.keyCode), forKey: Key.dictationKeyCode)
+            defaults.set(Int(newValue.modifiers), forKey: Key.dictationModifiers)
+        }
+    }
+
+    /// Подписывать известные голоса именами (Фаза 3). Опция поверх диаризации,
+    /// по умолчанию выключена.
+    public var identifyEnabled: Bool {
+        get { defaults.bool(forKey: Key.identify) }
+        set { defaults.set(newValue, forKey: Key.identify) }
+    }
+
+    public var identifyPreset: IdentifyPreset {
+        get { IdentifyPreset(rawValue: defaults.string(forKey: Key.identifyPreset) ?? "") ?? .balanced }
+        set { defaults.set(newValue.rawValue, forKey: Key.identifyPreset) }
+    }
+
+    /// Приложение звонка по умолчанию для Суфлёра; nil ↔ ключ отсутствует.
+    public var callAppBundleID: String? {
+        get { defaults.string(forKey: Key.callApp) }
+        set {
+            if let newValue { defaults.set(newValue, forKey: Key.callApp) } else { defaults.removeObject(forKey: Key.callApp) }
+        }
+    }
+
     /// Устройство для диаризации: 'mps' (быстро, Apple Silicon) или 'cpu'.
     public var diarizeDevice: String {
         get {
@@ -80,6 +170,52 @@ public final class SettingsStore {
             return Self.availableDevices.contains(v) ? v : Self.defaultDevice
         }
         set { defaults.set(newValue, forKey: Key.diarizeDevice) }
+    }
+
+    // MARK: суфлёр (этап 4, FR-12.14/12.5; в workerEnvironment не попадают никогда)
+
+    /// Запросов в минуту максимум.
+    public var promptRPM: Int {
+        get { max(1, defaults.integer(forKey: Key.promptRPM) == 0 ? 6 : defaults.integer(forKey: Key.promptRPM)) }
+        set { defaults.set(max(1, newValue), forKey: Key.promptRPM) }
+    }
+
+    /// Потолок стоимости за звонок, $; nil ↔ без потолка. По умолчанию 0.50 (RESULT:108-109 —
+    /// ограничивать надо задержку, а не расход); «без потолка» хранится как -1.
+    public var promptCostCeilingUSD: Double? {
+        get {
+            guard let raw = defaults.object(forKey: Key.promptCostCeiling) else { return 0.50 }
+            let v = (raw as? NSNumber)?.doubleValue ?? 0.50
+            return v < 0 ? nil : v
+        }
+        set { defaults.set(newValue ?? -1, forKey: Key.promptCostCeiling) }
+    }
+
+    /// Бюджет материалов, токенов (FP:146-147).
+    public var materialsBudgetTokens: Int {
+        get { defaults.object(forKey: Key.materialsBudget) == nil ? 120_000 : max(0, defaults.integer(forKey: Key.materialsBudget)) }
+        set { defaults.set(max(0, newValue), forKey: Key.materialsBudget) }
+    }
+
+    /// Компактная панель открывается автоматически при старте звонка (UX-OQ-7).
+    public var compactPanelAtStart: Bool {
+        get { defaults.bool(forKey: Key.compactPanelAtStart) }
+        set { defaults.set(newValue, forKey: Key.compactPanelAtStart) }
+    }
+
+    /// Доступ внешних агентов по MCP (docs/mcp.md). По умолчанию выключен.
+    public var agentAccessEnabled: Bool {
+        get { defaults.bool(forKey: Key.agentAccess) }
+        set { defaults.set(newValue, forKey: Key.agentAccess) }
+    }
+
+    /// Порт MCP на 127.0.0.1; вне 1024…65535 — порт по умолчанию.
+    public var agentAccessPort: Int {
+        get {
+            let v = defaults.integer(forKey: Key.agentPort)
+            return (1024...65535).contains(v) ? v : AgentAccess.defaultPort
+        }
+        set { defaults.set(newValue, forKey: Key.agentPort) }
     }
 
     /// Переменные окружения для worker'а. Telegram-ключи добавляются только если заданы —
@@ -94,6 +230,11 @@ public final class SettingsStore {
         if diarizeEnabled {
             env["MLAUD_DIARIZE"] = "1"
             env["MLAUD_DIARIZE_DEVICE"] = diarizeDevice
+            // Идентификация без диаризации невозможна: без неё нет кластеров.
+            if identifyEnabled {
+                env["MLAUD_IDENTIFY"] = "1"
+                env["MLAUD_IDENTIFY_THRESHOLD"] = String(format: "%.2f", identifyPreset.threshold)
+            }
         }
         let hf = hfToken.trimmingCharacters(in: .whitespacesAndNewlines)
         if !hf.isEmpty { env["MLAUD_HF_TOKEN"] = hf }

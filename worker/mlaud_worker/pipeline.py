@@ -7,11 +7,12 @@ import os
 import re
 import shutil
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from . import delivery_queue
+from . import channels, delivery_queue
 from .config import Config
 from .logutil import redact
 from .output import write_outputs
@@ -113,39 +114,101 @@ def _deliver(notifier, txt_path: Path, base: str) -> str:
         return f"failed: {msg}"
 
 
+@dataclass
+class Analysis:
+    """Разобранная запись: реплики и, при диаризации, кластеры с их подписями."""
+    segments: list
+    turns: list = field(default_factory=list)
+    centroids: dict = field(default_factory=dict)
+    names: dict = field(default_factory=dict)
+    idents: dict = field(default_factory=dict)
+
+
+def analyze(path: Path, cfg: Config, transcriber: Transcriber,
+            diarizer=None, gallery=None) -> Analysis:
+    """Транскрипция (→ диаризация → имена) без записи на диск.
+
+    Общее ядро конвейера и «разметить старую запись» (voices.py prepare): второй путь
+    делает то же самое, только без доставки и архивации.
+    `gallery` — {имя: центроид} из базы голосов; None/пусто — «Спикер N» везде.
+    """
+    if diarizer is None:
+        return Analysis(segments=transcriber.transcribe(str(path)))
+    # Точная диаризация: слова с тайм-кодами → разметка по спикерам → склейка в реплики.
+    # Имена подставляются на уровне подписей кластеров, вывод про них не знает.
+    from .diarize import group_words_by_speaker, identify_speakers, name_speakers
+    num = cfg.num_speakers or None
+    turns, centroids = diarizer.diarize(str(path), num_speakers=num)
+    words = transcriber.transcribe_words(str(path))
+    idents = identify_speakers(turns, centroids, gallery or {},
+                               cfg.identify_threshold, cfg.identify_min_speech)
+    names = name_speakers(turns, centroids, gallery or {},
+                          cfg.identify_threshold, cfg.identify_min_speech, idents=idents)
+    segments = group_words_by_speaker(words, turns, mapping=names)
+    return Analysis(segments, turns, centroids, names, idents)
+
+
 def process_file(path: Path, cfg: Config, transcriber: Transcriber,
-                 notifier=None, diarizer=None) -> dict:
-    """Обработать один файл: транскрипция (→ диаризация) → запись → доставка → архив."""
-    if diarizer is not None:
-        # Точная диаризация: слова с тайм-кодами → разметка по спикерам → склейка в реплики.
-        from .diarize import group_words_by_speaker
-        num = cfg.num_speakers or None
-        turns = diarizer.diarize(str(path), num_speakers=num)
-        words = transcriber.transcribe_words(str(path))
-        segments = group_words_by_speaker(words, turns)
+                 notifier=None, diarizer=None, gallery=None) -> dict:
+    """Обработать один файл: транскрипция (→ диаризация → имена) → запись → доставка → архив.
+
+    Запись звонка Суфлёра (рядом лежит `<call_id>.channels.json`) транскрибируется по
+    дорожкам без диаризации: кто говорит — известно по каналу (docs/feature-prompter.md §4.3).
+    Битый сайдкар — исключение, оба файла уходят в карантин."""
+    sidecar_file = channels.find_sidecar(path)
+    if sidecar_file is not None:
+        sidecar = channels.read_sidecar(sidecar_file)
+        result = Analysis(segments=channels.transcribe_channels(path, sidecar, transcriber))
     else:
-        segments = transcriber.transcribe(str(path))
+        sidecar = None
+        result = analyze(path, cfg, transcriber, diarizer, gallery)
+    segments = result.segments
     period = derive_period(path)
     base = path.stem
 
     out_dir = cfg.output / period
     outputs = write_outputs(segments, out_dir, base)
 
+    # Итоги суфлёра (§3.7): копия outcome.md рядом с транскриптом — до доставок, чтобы
+    # блок prompter в артефакте нашёл файл. Итоги опоздали/отменены — копии нет.
+    prompter_md = None
+    if sidecar is not None:
+        from . import prompter_files
+        outcome = prompter_files.outcome_md(cfg, sidecar.call_id)
+        if outcome is not None:
+            prompter_md = prompter_files.copy_outcome(outcome, out_dir, base)
+
+    # Сайдкар для разметки голосов — до архивации: клипы режутся из исходного аудио.
+    # Пишется и при пустой базе: иначе первый голос завести неоткуда.
+    speakers = None
+    if sidecar is None and diarizer is not None and cfg.identify:
+        speakers = _write_speakers(cfg, path, period, base, outputs, result.turns,
+                                   result.centroids, result.names, result.idents, segments)
+
     delivery = _deliver(notifier, outputs["txt"], base)
     # Сбой доставки (сеть/Telegram недоступны) — в очередь на автоповтор следующим прогоном.
     if delivery.startswith("failed"):
         delivery_queue.enqueue(cfg, outputs["txt"], base)
+
+    # Итоги — после транскрипта (FP:642-644): «расшифровка → итоги».
+    outcome_delivery = _deliver_outcome(notifier, cfg, prompter_md, base)
 
     # Архив ВСЕГДА (даже при сбое доставки) — переносим аудио из inbox на локальный диск.
     proc_dir = cfg.processed / period
     proc_dir.mkdir(parents=True, exist_ok=True)
     dest = proc_dir / path.name
     shutil.move(str(path), str(dest))
+    if sidecar_file is not None:
+        shutil.move(str(sidecar_file), str(proc_dir / sidecar_file.name))
 
     # Сдача артефакта роутеру — после архивации, чтобы в описании стоял путь к аудио на
     # его постоянном месте. Никогда не роняет обработку: роутер может быть не запущен,
     # папка обмена — недоступна, а транскрипт уже сделан и доставлен.
-    artifact = _handoff(dest, outputs, segments, cfg)
+    from . import prompter_files
+    artifact = _handoff(dest, outputs, segments, cfg,
+                        started_at=channels.started_at(sidecar) if sidecar else None,
+                        sidecar=sidecar,
+                        goal=prompter_files.goal(cfg, sidecar.call_id) if sidecar else None)
 
     return {
         "source": path.name,
@@ -155,8 +218,46 @@ def process_file(path: Path, cfg: Config, transcriber: Transcriber,
         "srt": outputs["srt"],
         "archived": dest,
         "delivery": delivery,
+        "outcome_delivery": outcome_delivery,
         "artifact": artifact,
+        "speakers": speakers,
+        "channels": sidecar.channels if sidecar else None,
     }
+
+
+def _deliver_outcome(notifier, cfg, prompter_md: Path | None, base: str) -> str:
+    """Доставка итогов суфлёра после транскрипта. НИКОГДА не бросает (как _deliver);
+    нет итогов — "none"; сбой — в очередь автоповтора тем же файлом."""
+    if prompter_md is None:
+        return "none"
+    if notifier is None:
+        return "skipped"
+    try:
+        notifier.send_document(prompter_md, caption=f"{base} — итоги")
+        return "sent"
+    except Exception as e:  # noqa: BLE001
+        msg = redact(str(e))
+        delivery_queue.enqueue(cfg, prompter_md, base + ".prompter")
+        try:
+            notifier.send_error(f"{base} — итоги: доставка не удалась — {msg}")
+        except Exception:
+            pass
+        return f"failed: {msg}"
+
+
+def _write_speakers(cfg, path, period, base, outputs, turns, centroids, names, idents,
+                    segments) -> dict:
+    """Сайдкар записи (speakers.py). Никогда не роняет обработку: транскрипт уже готов."""
+    from . import speakers as spk
+
+    try:
+        sidecar = spk.write(cfg, path, period=period, base=base, outputs=outputs,
+                            turns=turns, centroids=centroids, names=names, idents=idents,
+                            segments=segments)
+        return {"status": "written", "pending": spk.pending_count(sidecar),
+                "path": str(spk.sidecar_dir(cfg, period, base) / spk.FILE_NAME)}
+    except Exception as e:  # noqa: BLE001
+        return {"status": f"failed: {redact(str(e))}", "pending": 0}
 
 
 def _segments_duration(segments: list[dict]) -> Optional[int]:
@@ -165,17 +266,33 @@ def _segments_duration(segments: list[dict]) -> Optional[int]:
     return int(round(max(ends))) if ends and max(ends) > 0 else None
 
 
-def _handoff(audio_path: Path, outputs: dict, segments: list[dict], cfg: Config) -> str:
-    """Сайдкар рядом с транскриптом + json в папку обмена. Возвращает статус для лога."""
+def _handoff(audio_path: Path, outputs: dict, segments: list[dict], cfg: Config, *,
+             started_at: Optional[datetime] = None, sidecar=None,
+             goal: Optional[str] = None) -> str:
+    """Сайдкар рядом с транскриптом + json в папку обмена. Возвращает статус для лога.
+
+    `started_at`/`sidecar`/`goal` — для записи звонка: время из call_id, блок Суфлёра,
+    когда рядом с транскриптом лежат итоги `<base>.prompter.md` (копию сделал process_file),
+    и цель из brief.md по call.json."""
     from . import artifact
 
     try:
+        prompter = None
+        if sidecar is not None:
+            prompter_md = outputs["txt"].with_name(audio_path.stem + ".prompter.md")
+            prompter = artifact.prompter_block(
+                call_id=sidecar.call_id, brief=sidecar.brief, goal=goal,
+                outcome_path=prompter_md if prompter_md.exists() else None,
+                asr_root=cfg.asr_root,
+            )
         payload = artifact.build_payload(
             audio_path=audio_path,
             txt_path=outputs["txt"],
             srt_path=outputs.get("srt"),
             asr_root=cfg.asr_root,
             duration_sec=_segments_duration(segments),
+            started_at=started_at,
+            prompter=prompter,
         )
         artifact.write_sidecar(outputs["txt"], payload)
         if cfg.router_inbox is None:
@@ -189,6 +306,12 @@ def _handoff(audio_path: Path, outputs: dict, segments: list[dict], cfg: Config)
         return "sent"
     except Exception as e:  # noqa: BLE001 — сдача артефакта не должна ломать конвейер
         return f"failed: {redact(str(e))}"
+
+
+def _load_gallery(cfg: Config) -> dict:
+    """База голосов для матчинга. Нет каталога — пустая база, «Спикер N» везде."""
+    from .voices import VoiceStore
+    return VoiceStore(cfg.voices_dir).gallery()
 
 
 def _build_diarizer(cfg: Config):
@@ -205,24 +328,41 @@ def process_inbox(cfg: Config, transcriber: Optional[Transcriber] = None,
                   notifier=None, use_lock: bool = True, diarizer=None) -> dict:
     """Обработать весь inbox пакетом. Возвращает {'processed': [...], 'errors': [...]}."""
     cfg.ensure_dirs()
-    results = {"processed": [], "errors": [], "redelivered": [], "pending": []}
+    results = {"processed": [], "errors": [], "redelivered": [], "pending": [],
+               "given_up": [], "identify_error": None}
 
     def _run():
         nonlocal transcriber, diarizer
+        gallery = None
         # Сначала досылаем всё, что не ушло в прошлые разы (сеть могла вернуться).
         # Дёшево: модель НЕ грузим, если транскрибировать нечего — прогон может быть
         # чисто «досыльным» (inbox пуст, но в очереди висит недоставленное).
         flushed = delivery_queue.flush(cfg, notifier, _deliver)
         results["redelivered"] = flushed["resent"]
+        results["given_up"] = flushed.get("given_up", [])
         files = list_audio(cfg)
         if files:
             transcriber = transcriber or Transcriber(model_type=cfg.model_type)
             if diarizer is None:
                 diarizer = _build_diarizer(cfg)
+            # Идентификация — только поверх диаризации; база читается раз на прогон.
+            # Битая база не должна останавливать транскрипцию: имена — опция,
+            # файлы копились бы в inbox из-за одного испорченного json.
+            if diarizer is not None and cfg.identify:
+                try:
+                    gallery = _load_gallery(cfg)
+                except Exception as e:  # noqa: BLE001
+                    results["identify_error"] = redact(str(e))
+                # Старые сайдкары с клипами и векторами — биометрия, чистим по возрасту.
+                try:
+                    from . import speakers as spk
+                    spk.sweep(cfg)
+                except Exception:  # noqa: BLE001
+                    pass
         for path in files:
             try:
                 results["processed"].append(
-                    process_file(path, cfg, transcriber, notifier, diarizer)
+                    process_file(path, cfg, transcriber, notifier, diarizer, gallery)
                 )
             except Exception as e:  # noqa: BLE001 — один файл не должен ронять пакет
                 results["errors"].append({"source": path.name, "error": redact(str(e))})
@@ -233,6 +373,12 @@ def process_inbox(cfg: Config, transcriber: Optional[Transcriber] = None,
                     shutil.move(str(path), str(cfg.failed / path.name))
                 except Exception:
                     pass
+                sidecar_file = channels.find_sidecar(path)
+                if sidecar_file is not None:
+                    try:
+                        shutil.move(str(sidecar_file), str(cfg.failed / sidecar_file.name))
+                    except Exception:
+                        pass
                 if notifier is not None:
                     try:
                         notifier.send_error(f"{path.name}: {redact(str(e))}")

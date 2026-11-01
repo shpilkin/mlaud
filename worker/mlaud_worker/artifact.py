@@ -142,6 +142,9 @@ def started_at(path: Path, duration_sec: int | None = None) -> tuple[datetime, s
     return mtime, "mtime"
 
 
+_detect_started_at = started_at
+
+
 def _relative(path: Path, root: Path | None) -> str:
     """Путь от корня архива. Абсолютный — только если файл лежит вне корня: перенос
     архива не должен рвать ссылку (§9.2)."""
@@ -160,14 +163,23 @@ def build_payload(
     srt_path: Path | None,
     asr_root: Path | None,
     duration_sec: int | None = None,
+    started_at: datetime | None = None,
+    prompter: dict | None = None,
 ) -> dict:
     """Описание встречи для роутера. Только то, что известно ДО маршрутизации: ни проектов,
-    ни уверенности — их определит Niti."""
+    ни уверенности — их определит Niti.
+
+    `started_at` — время из сайдкара каналов звонка (источник "sidecar"): afconvert пишет
+    в mvhd время конвертации, а не начала звонка, и метаданным файла здесь верить нельзя.
+    `prompter` — блок Суфлёра (prompter_block), добавляется последним ключом."""
     meta = read_mp4_meta(audio_path)
     # Длительность самого файла точнее, чем конец последнего сегмента: расшифровка
     # обрывается на последней реплике, а запись обычно идёт ещё какое-то время.
     duration = meta.get("duration_sec") or duration_sec
-    when, source = started_at(audio_path, duration)
+    if started_at is not None:
+        when, source = started_at, "sidecar"
+    else:
+        when, source = _detect_started_at(audio_path, duration)
     payload = {
         "meeting_id": meeting_id(audio_path),
         "started_at": when.astimezone().isoformat(),
@@ -180,7 +192,26 @@ def build_payload(
     }
     if srt_path is not None:
         payload["srt_path"] = _relative(srt_path, asr_root)
+    if prompter is not None:
+        payload["prompter"] = prompter
     return payload
+
+
+def prompter_block(
+    *,
+    call_id: str,
+    brief: str | None,
+    goal: str | None,
+    outcome_path: Path | None,
+    asr_root: Path | None,
+) -> dict:
+    """Блок Суфлёра в артефакте: звонок, бриф, цель и путь к итогам относительно архива."""
+    return {
+        "call_id": call_id,
+        "brief": brief,
+        "goal": goal,
+        "outcome_path": _relative(outcome_path, asr_root) if outcome_path is not None else None,
+    }
 
 
 def _write_atomic(path: Path, text: str) -> None:
