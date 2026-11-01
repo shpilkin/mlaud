@@ -2,7 +2,7 @@
 
 from mlaud_worker.auth import is_owner, extract_chat_id, filter_owner_updates
 
-OWNER = 123456789
+OWNER = 123456789  # вымышленный chat_id
 
 
 def test_is_owner_match():

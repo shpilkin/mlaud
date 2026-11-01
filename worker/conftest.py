@@ -10,7 +10,18 @@ import soundfile as sf
 # Сделать пакет mlaud_worker импортируемым (worker/ на пути).
 sys.path.insert(0, os.path.dirname(__file__))
 
-REAL_M4A = Path("/Users/<user>/my_projects/mlaud/test data/Пример записи.m4a")
+# Реальная запись для интеграционных тестов: путь берётся из MLAUD_TEST_M4A,
+# иначе — первый .m4a из ../test data/ (папка в .gitignore: личные голоса в git не кладём).
+def _find_real_m4a() -> Path:
+    env = os.environ.get("MLAUD_TEST_M4A")
+    if env:
+        return Path(env)
+    data_dir = Path(__file__).resolve().parent.parent / "test data"
+    found = sorted(data_dir.glob("*.m4a")) if data_dir.is_dir() else []
+    return found[0] if found else data_dir / "sample.m4a"
+
+
+REAL_M4A = _find_real_m4a()
 
 
 @pytest.fixture(scope="session")
