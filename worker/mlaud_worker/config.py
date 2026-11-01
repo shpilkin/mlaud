@@ -8,6 +8,24 @@ from pathlib import Path
 DEFAULT_AUDIO_EXTS = (".m4a", ".mp3", ".wav", ".aac", ".aiff", ".caf", ".flac",
                       ".mp4", ".webm", ".mkv", ".ogg", ".oga", ".opus")
 
+ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+
+def read_dotenv(path: Path = ENV_PATH) -> dict:
+    """Пары ключ=значение из worker/.env (без зависимости python-dotenv): первое непустое."""
+    values = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip().strip('"').strip("'")
+        if key and val and key not in values:
+            values[key] = val
+    return values
+
 
 @dataclass
 class Config:

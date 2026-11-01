@@ -146,7 +146,16 @@ class Diarizer:
         # 3.x: use_auth_token=, 4.x: token= — выбираем по сигнатуре.
         params = inspect.signature(Pipeline.from_pretrained).parameters
         auth_kw = "token" if "token" in params else "use_auth_token"
-        pipeline = Pipeline.from_pretrained(self.PIPELINE, **{auth_kw: self.hf_token})
+        try:
+            pipeline = Pipeline.from_pretrained(self.PIPELINE, **{auth_kw: self.hf_token})
+        except OSError as e:
+            # Сетевой слой (requests) наследует OSError. Хэндлится только случай
+            # «кэш неполон + нет сети»: при полном кэше hfcache уже отключил сеть.
+            # Без этого в меню приложения прилетает сырой MaxRetryError (2026-10-12).
+            raise RuntimeError(
+                "диаризация не загрузилась: huggingface.co недоступен, "
+                "а кэш моделей неполон — докачка требует интернета"
+            ) from e
         if pipeline is None:
             raise RuntimeError(
                 "pyannote вернул None: не приняты условия модели или неверный HF-токен"

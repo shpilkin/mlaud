@@ -144,3 +144,20 @@ def test_build_config_identify_env(monkeypatch):
 
     monkeypatch.setenv("MLAUD_IDENTIFY", "0")
     assert m.build_config().identify is False
+
+
+def test_read_dotenv_first_nonempty_wins(tmp_path):
+    from mlaud_worker.config import read_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text('# комментарий\nA=\nA="1"\nA=2\nB = \'x\'\nмусор\n', encoding="utf-8")
+    assert read_dotenv(env) == {"A": "1", "B": "x"}
+    assert read_dotenv(tmp_path / "нет") == {}
+
+
+def test_load_dotenv_does_not_override_env(monkeypatch):
+    env = {"MLAUD_X1": "env"}
+    monkeypatch.setattr(m.os, "environ", env)
+    monkeypatch.setattr(m, "read_dotenv", lambda: {"MLAUD_X1": "file", "MLAUD_X2": "file"})
+    m.load_dotenv()
+    assert env == {"MLAUD_X1": "env", "MLAUD_X2": "file"}

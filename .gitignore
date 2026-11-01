@@ -31,3 +31,6 @@ test data/
 
 # macOS
 .DS_Store
+
+# черновики (не коммитить)
+scratch/

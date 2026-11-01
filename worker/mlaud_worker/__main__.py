@@ -5,9 +5,8 @@
 
 import os
 import sys
-from pathlib import Path
 
-from .config import Config
+from .config import Config, read_dotenv
 from .delivery_queue import MAX_ATTEMPTS
 from .pipeline import process_inbox
 from .telegram import TelegramNotifier
@@ -18,17 +17,8 @@ def load_dotenv() -> None:
 
     Заполняет os.environ только для ещё не заданных ключей.
     """
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        key, val = key.strip(), val.strip().strip('"').strip("'")
-        if key and val and key not in os.environ:
-            os.environ[key] = val
+    for key, val in read_dotenv().items():
+        os.environ.setdefault(key, val)
 
 
 def _flag(key: str) -> bool:
